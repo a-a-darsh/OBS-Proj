@@ -4,3 +4,8 @@
 /__pycache__
 /data/__pycache__
 *.pyc
+/.idea
+/venv
+/samples
+/samples1
+/checkpoints

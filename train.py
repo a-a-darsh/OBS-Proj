@@ -21,17 +21,20 @@ Multi-directional: every batch contains randomly-sampled (src, tgt) pairs
 that can span ANY two stages in either direction.  No unidirectional bias.
 """
 import os
+import random
 import argparse
 import torch
 import torch.nn.functional as F
+from torch.amp import autocast, GradScaler
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+from tqdm import tqdm
 
 from config import Config
 from model import CharacterGenerator, MultiStageDiscriminator, StagePredictor
 from data import CharacterEvolutionDataset
 from losses import (
-    adv_loss_g, adv_loss_d, r1_penalty,
+    adv_loss_g, adv_loss_d, gradient_penalty,
     cycle_loss, diversity_loss, PerceptualLoss,
     complexity_weighted_recon, stage_consistency_loss,
 )
@@ -65,16 +68,7 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
         real_row = []
         for s in range(cfg.num_stages):
             if s in available:
-                import random
-                from PIL import Image
-                from torchvision import transforms
-                tf = transforms.Compose([
-                    transforms.Grayscale(),
-                    transforms.Resize((cfg.image_size, cfg.image_size)),
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.5], [0.5]),
-                ])
-                img = tf(Image.open(random.choice(available[s])).convert("L"))
+                img = val_set._load(random.choice(available[s]))
                 real_row.append(img.to(device))
             else:
                 real_row.append(torch.ones(1, cfg.image_size, cfg.image_size,
@@ -82,22 +76,16 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
 
         # Generate the full sequence from the latest available stage
         latest = max(available.keys())
-        src_path = random.choice(available[latest])
-        from PIL import Image
-        from torchvision import transforms
-        tf = transforms.Compose([
-            transforms.Grayscale(),
-            transforms.Resize((cfg.image_size, cfg.image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
-        src_img = tf(Image.open(src_path).convert("L")).unsqueeze(0).to(device)
+        src_img = val_set._load(random.choice(available[latest])).unsqueeze(0).to(device)  # (1, C, H, W)
+        # Match training shape: (B, max_refs, C, H, W) with a mask
+        src_img_refs = src_img.unsqueeze(1)  # (1, 1, C, H, W)
+        src_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
         src_stage_t = torch.tensor([latest], device=device)
 
         gen_row = []
         for t in range(cfg.num_stages):
             tgt_stage_t = torch.tensor([t], device=device)
-            fake = G(src_img, src_stage_t, tgt_stage_t)
+            fake = G(src_img_refs, src_stage_t, tgt_stage_t, src_mask=src_mask)
             gen_row.append(fake.squeeze(0))
 
         rows.append(torch.stack(real_row))
@@ -105,13 +93,27 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
 
     grid = torch.cat(rows, dim=0)
     path = os.path.join(cfg.sample_dir, f"samples_epoch{epoch:04d}.png")
+    os.makedirs(cfg.sample_dir, exist_ok=True)
     save_image(grid * 0.5 + 0.5, path, nrow=cfg.num_stages)
     G.train()
 
 
 # ── Main training loop ────────────────────────────────────────────────────────
 
-def train(cfg: Config):
+def load_checkpoint(path: str, G, D, P, opt_G, opt_D, device) -> int:
+    ckpt = torch.load(path, map_location=device)
+    G.load_state_dict(ckpt["G"])
+    D.load_state_dict(ckpt["D"])
+    P.load_state_dict(ckpt["P"])
+    opt_G.load_state_dict(ckpt["opt_G"])
+    opt_D.load_state_dict(ckpt["opt_D"])
+    print(f"  ← resumed from {path} (epoch {ckpt['epoch']})")
+    return ckpt["epoch"]
+
+
+def train(cfg: Config, resume: str | None = None):
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.benchmark = True
     os.makedirs(cfg.checkpoint_dir, exist_ok=True)
     os.makedirs(cfg.sample_dir, exist_ok=True)
 
@@ -120,12 +122,14 @@ def train(cfg: Config):
 
     # ── Data ──────────────────────────────────────────────────────────
     train_set = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
-                                          split="train", max_refs=cfg.max_refs)
+                                          split="train", max_refs=cfg.max_refs,
+                                          num_stages=cfg.num_stages)
     val_set   = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
-                                          split="val", max_refs=cfg.max_refs)
+                                          split="val", max_refs=cfg.max_refs,
+                                          num_stages=cfg.num_stages)
     loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True,
                         num_workers=cfg.num_workers, pin_memory=True,
-                        drop_last=True)
+                        drop_last=True, persistent_workers=cfg.num_workers > 0)
     print(f"Train pairs: {len(train_set):,}  Val chars: {len(val_set.chars):,}")
 
     # ── Models ────────────────────────────────────────────────────────
@@ -146,29 +150,29 @@ def train(cfg: Config):
 
     d_step = 0
 
-    for epoch in range(1, cfg.n_epochs + 1):
-        G.train(); D.train(); P.train()
+    for epoch in tqdm(range(1, cfg.n_epochs + 1), desc="Epochs"):
+        G.train()
+        D.train()
+        P.train()
         epoch_d_loss = epoch_g_loss = 0.0
         n_batches = 0
 
-        for batch in loader:
-            src_imgs  = batch["src_imgs"].to(device)
-            src_mask  = batch["src_mask"].to(device)
-            tgt_img   = batch["tgt_img"].to(device)
+        for batch in tqdm(loader, desc=f"Epoch {epoch}", leave=False):
+            src_imgs = batch["src_imgs"].to(device)
+            src_mask = batch["src_mask"].to(device)
+            tgt_img = batch["tgt_img"].to(device)
             src_stage = batch["src_stage"].to(device)
             tgt_stage = batch["tgt_stage"].to(device)
             B = src_imgs.shape[0]
 
             # Pixel mean of valid refs — used as cycle-consistency target
-            mask_f   = src_mask.float().view(B, src_imgs.shape[1], 1, 1, 1)
+            mask_f = src_mask.float().view(B, src_imgs.shape[1], 1, 1, 1)
             mean_src = (src_imgs * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
-            # ── Discriminator step ──────────────────────────────
-            tgt_img_r1 = tgt_img.requires_grad_(True)
-            real_pred  = D(tgt_img_r1, tgt_stage)
-
+            # ── Discriminator / critic step ──────────────────────
             with torch.no_grad():
                 fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
+            real_pred = D(tgt_img, tgt_stage)
             fake_pred = D(fake_tgt_d.detach(), tgt_stage)
 
             d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
@@ -177,10 +181,13 @@ def train(cfg: Config):
             p_real_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
             d_loss = d_loss + p_real_loss
 
-            # Lazy R1 penalty
+            # WGAN-GP: lazy gradient penalty on interpolated real/fake points
             if d_step % cfg.r1_every == 0:
-                r1 = r1_penalty(real_pred, tgt_img_r1)
-                d_loss = d_loss + (cfg.lambda_r1 / 2) * r1
+                alpha = torch.rand(B, 1, 1, 1, device=device)
+                interp = (alpha * tgt_img.detach() +
+                          (1 - alpha) * fake_tgt_d.detach()).requires_grad_(True)
+                gp = gradient_penalty(D(interp, tgt_stage), interp)
+                d_loss = d_loss + cfg.lambda_r1 * gp
 
             opt_D.zero_grad()
             d_loss.backward()
@@ -191,7 +198,7 @@ def train(cfg: Config):
             noise1 = torch.randn(B, cfg.latent_dim, device=device)
             noise2 = torch.randn(B, cfg.latent_dim, device=device)
 
-            fake_tgt  = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
+            fake_tgt = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
             fake_pred = D(fake_tgt, tgt_stage)
 
             # 1. Adversarial
@@ -203,13 +210,15 @@ def train(cfg: Config):
             # 3. Cycle consistency
             recon_src = G(fake_tgt, tgt_stage, src_stage, noise1)
             g_loss += cfg.lambda_cycle * cycle_loss(recon_src, mean_src)
+            g_loss += cfg.lambda_percep * perceptual(recon_src, mean_src)
 
             # 4. Diversity  (two noise samples should differ)
             fake_tgt2 = G(src_imgs, src_stage, tgt_stage, noise2, src_mask=src_mask)
             g_loss += cfg.lambda_div * diversity_loss(fake_tgt, fake_tgt2)
 
-            # 5. Complexity-weighted reconstruction vs. ground-truth target
+            # 5. Complexity-weighted reconstruction + perceptual vs. ground-truth target
             g_loss += cfg.lambda_recon * complexity_weighted_recon(fake_tgt, tgt_img)
+            g_loss += cfg.lambda_percep * perceptual(fake_tgt, tgt_img)
 
             opt_G.zero_grad()
             g_loss.backward()
@@ -219,9 +228,9 @@ def train(cfg: Config):
             epoch_g_loss += g_loss.item()
             n_batches += 1
 
-        print(f"Epoch {epoch:4d}/{cfg.n_epochs}  "
-              f"D={epoch_d_loss/n_batches:.4f}  "
-              f"G={epoch_g_loss/n_batches:.4f}")
+        tqdm.write(f"Epoch {epoch:4d}/{cfg.n_epochs}  "
+                   f"D={epoch_d_loss / n_batches:.4f}  "
+                   f"G={epoch_g_loss / n_batches:.4f}")
 
         if epoch % cfg.sample_every == 0:
             save_samples(G, val_set, epoch, cfg, device)
@@ -236,13 +245,13 @@ def train(cfg: Config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir",        default=None)
-    parser.add_argument("--batch_size",      type=int,   default=None)
-    parser.add_argument("--n_epochs",        type=int,   default=None)
-    parser.add_argument("--lr_g",            type=float, default=None)
-    parser.add_argument("--device",          default=None)
-    parser.add_argument("--checkpoint_dir",  default=None)
-    parser.add_argument("--sample_dir",      default=None)
+    parser.add_argument("--data_dir", default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--n_epochs", type=int, default=None)
+    parser.add_argument("--lr_g", type=float, default=None)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--checkpoint_dir", default=None)
+    parser.add_argument("--sample_dir", default=None)
     args = parser.parse_args()
 
     cfg = Config()

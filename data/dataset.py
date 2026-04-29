@@ -53,6 +53,8 @@ ERA_FOLDER_TO_STAGE = {
     "clerical_script":        3,
     "modern":                 4,
     "chu_bamboo_silk_script": 5,
+    "Liushutong characters 六书通的字": 6
+
 }
 
 # JSON path — used to build a number→character lookup
@@ -153,9 +155,11 @@ class CharacterEvolutionDataset(Dataset):
     def __init__(self, data_dir: str, image_size: int = 64,
                  split: str = "train", val_fraction: float = 0.05,
                  seed: int = 42, max_refs: int = 4,
+                 num_stages: int = 7,
                  json_path: str = _DEFAULT_JSON):
         self.max_refs = max_refs
         self.image_size = image_size
+        self.num_stages = num_stages
 
         _base = [
             transforms.Grayscale(),
@@ -253,7 +257,17 @@ class CharacterEvolutionDataset(Dataset):
 
     # ── Helpers ───────────────────────────────────────────────────────
     def _load(self, path: str) -> torch.Tensor:
-        img = Image.open(path).convert("L")
+        img = Image.open(path)
+        if img.mode in ("RGBA", "LA", "PA"):
+            # Composite onto white before dropping alpha — otherwise transparent
+            # pixels with black RGB become black in "L" mode, causing _invert_if_dark
+            # to flip the whole image white (strokes and background alike).
+            bg = Image.new("L", img.size, 255)
+            alpha = img.convert("RGBA").split()[3]
+            bg.paste(img.convert("L"), mask=alpha)
+            img = bg
+        else:
+            img = img.convert("L")
         img = _invert_if_dark(img)
         return self.transform(img)
 
@@ -282,7 +296,7 @@ class CharacterEvolutionDataset(Dataset):
         tgt_img = self._load(random.choice(char["stages"][t]))
 
         # Availability mask: which stages this character has ground-truth for
-        stage_mask = torch.zeros(5, dtype=torch.bool)
+        stage_mask = torch.zeros(self.num_stages, dtype=torch.bool)
         for k in char["stages"]:
             stage_mask[k] = True
 

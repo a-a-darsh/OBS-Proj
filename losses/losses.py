@@ -17,33 +17,31 @@ import torch.nn.functional as F
 import torchvision.models as models
 
 
-# ── GAN losses ────────────────────────────────────────────────────────────────
+# ── GAN losses (Wasserstein) ──────────────────────────────────────────────────
 
 def adv_loss_g(fake_pred: torch.Tensor) -> torch.Tensor:
-    """Non-saturating generator loss: maximise log D(fake)."""
-    return F.softplus(-fake_pred).mean()
+    """WGAN generator loss: maximise critic score on fakes."""
+    return -fake_pred.mean()
 
 
 def adv_loss_d(real_pred: torch.Tensor,
                fake_pred: torch.Tensor) -> torch.Tensor:
-    """Discriminator loss: maximise log D(real) + log(1-D(fake))."""
-    return F.softplus(-real_pred).mean() + F.softplus(fake_pred).mean()
+    """WGAN critic loss: maximise margin between real and fake scores."""
+    return fake_pred.mean() - real_pred.mean()
 
 
-def r1_penalty(real_pred: torch.Tensor,
-               real_img: torch.Tensor) -> torch.Tensor:
+def gradient_penalty(critic_out: torch.Tensor,
+                     interp: torch.Tensor) -> torch.Tensor:
     """
-    R1 gradient penalty on the discriminator's real-data gradient.
-    Stabilises training without spectral normalisation.
-    Applied lazily (every r1_every steps) to amortise cost.
+    WGAN-GP gradient penalty: enforce 1-Lipschitz by penalising critic
+    gradients that deviate from unit norm on interpolated real/fake points.
     """
     grad, = torch.autograd.grad(
-        outputs=real_pred.sum(),
-        inputs=real_img,
+        outputs=critic_out.sum(),
+        inputs=interp,
         create_graph=True,
-        retain_graph=True,
     )
-    return grad.pow(2).flatten(1).sum(1).mean()
+    return ((grad.flatten(1).norm(2, dim=1) - 1) ** 2).mean()
 
 
 # ── Generator auxiliary losses ────────────────────────────────────────────────
@@ -105,9 +103,9 @@ class PerceptualLoss(nn.Module):
     def forward(self, fake: torch.Tensor,
                 real: torch.Tensor) -> torch.Tensor:
         f, r = self._prep(fake), self._prep(real.detach())
-        loss  = F.l1_loss(self.slice1(f), self.slice1(r))
-        loss += F.l1_loss(self.slice2(f), self.slice2(r))
-        return loss
+        f1, r1 = self.slice1(f), self.slice1(r)
+        f2, r2 = self.slice2(f1), self.slice2(r1)
+        return F.l1_loss(f1, r1) + F.l1_loss(f2, r2)
 
 
 # ── Complexity-aware weighting ────────────────────────────────────────────────
