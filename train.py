@@ -26,7 +26,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.utils import save_image
 from tqdm import tqdm
 
@@ -127,7 +127,12 @@ def train(cfg: Config, resume: str | None = None):
     val_set   = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
                                           split="val", max_refs=cfg.max_refs,
                                           num_stages=cfg.num_stages)
-    loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True,
+    sampler = WeightedRandomSampler(
+        weights=train_set.sample_weights,
+        num_samples=len(train_set),
+        replacement=True,
+    )
+    loader = DataLoader(train_set, batch_size=cfg.batch_size, sampler=sampler,
                         num_workers=cfg.num_workers, pin_memory=True,
                         drop_last=True, persistent_workers=cfg.num_workers > 0)
     print(f"Train pairs: {len(train_set):,}  Val chars: {len(val_set.chars):,}")
@@ -148,9 +153,13 @@ def train(cfg: Config, resume: str | None = None):
         D.parameters(), lr=cfg.lr_d, betas=(cfg.beta1, cfg.beta2),
     )
 
+    start_epoch = 0
+    if resume:
+        start_epoch = load_checkpoint(resume, G, D, P, opt_G, opt_D, device)
+
     d_step = 0
 
-    for epoch in tqdm(range(1, cfg.n_epochs + 1), desc="Epochs"):
+    for epoch in tqdm(range(start_epoch + 1, cfg.n_epochs + 1), desc="Epochs"):
         G.train()
         D.train()
         P.train()
@@ -252,11 +261,13 @@ if __name__ == "__main__":
     parser.add_argument("--device", default=None)
     parser.add_argument("--checkpoint_dir", default=None)
     parser.add_argument("--sample_dir", default=None)
+    parser.add_argument("--resume",     default=None,
+                        help="path to checkpoint to resume from")
     args = parser.parse_args()
 
     cfg = Config()
     for k, v in vars(args).items():
-        if v is not None:
+        if k != "resume" and v is not None:
             setattr(cfg, k, v)
 
-    train(cfg)
+    train(cfg, resume=args.resume)
