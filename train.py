@@ -64,6 +64,7 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
     n_show = min(8, len(val_set.chars))
     for char_info in val_set.chars[:n_show]:
         available = char_info["stages"]
+
         # Show real images for each stage (blank if missing)
         real_row = []
         for s in range(cfg.num_stages):
@@ -75,7 +76,10 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
                                            device=device))   # white placeholder
 
         # Generate the full sequence from the latest available stage
-        latest = max(available.keys())
+        if 4 in available:
+            latest = 4
+        else:
+            latest = max(available.keys())
         src_img = val_set._load(random.choice(available[latest])).unsqueeze(0).to(device)  # (1, C, H, W)
         # Match training shape: (B, max_refs, C, H, W) with a mask
         src_img_refs = src_img.unsqueeze(1)  # (1, 1, C, H, W)
