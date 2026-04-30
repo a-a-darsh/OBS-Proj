@@ -255,19 +255,6 @@ class CharacterEvolutionDataset(Dataset):
                     if s != t:
                         self.pairs.append((char_idx, s, t))
 
-        # ── Per-pair sampling weights (balance sparse vs dense characters) ──
-        # Group pairs by era count; weight each pair by 1/group_size so every
-        # density class contributes equally regardless of how many characters
-        # fall in it.
-        from collections import Counter
-        class_sizes: Counter = Counter(
-            len(self.chars[char_idx]["stages"]) for char_idx, _, _ in self.pairs
-        )
-        self.sample_weights = torch.tensor([
-            1.0 / class_sizes[len(self.chars[char_idx]["stages"])]
-            for char_idx, _, _ in self.pairs
-        ], dtype=torch.double)
-
     # ── Helpers ───────────────────────────────────────────────────────
     def _load(self, path: str) -> torch.Tensor:
         img = Image.open(path)

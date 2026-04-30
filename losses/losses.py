@@ -17,31 +17,33 @@ import torch.nn.functional as F
 import torchvision.models as models
 
 
-# ── GAN losses (Wasserstein) ──────────────────────────────────────────────────
+# ── GAN losses ────────────────────────────────────────────────────────────────
 
 def adv_loss_g(fake_pred: torch.Tensor) -> torch.Tensor:
-    """WGAN generator loss: maximise critic score on fakes."""
-    return -fake_pred.mean()
+    """Non-saturating generator loss: maximise log D(fake)."""
+    return F.softplus(-fake_pred).mean()
 
 
 def adv_loss_d(real_pred: torch.Tensor,
                fake_pred: torch.Tensor) -> torch.Tensor:
-    """WGAN critic loss: maximise margin between real and fake scores."""
-    return fake_pred.mean() - real_pred.mean()
+    """Discriminator loss: maximise log D(real) + log(1-D(fake))."""
+    return F.softplus(-real_pred).mean() + F.softplus(fake_pred).mean()
 
 
-def gradient_penalty(critic_out: torch.Tensor,
-                     interp: torch.Tensor) -> torch.Tensor:
+def r1_penalty(real_pred: torch.Tensor,
+               real_img: torch.Tensor) -> torch.Tensor:
     """
-    WGAN-GP gradient penalty: enforce 1-Lipschitz by penalising critic
-    gradients that deviate from unit norm on interpolated real/fake points.
+    R1 gradient penalty on the discriminator's real-data gradient.
+    Stabilises training without spectral normalisation.
+    Applied lazily (every r1_every steps) to amortise cost.
     """
     grad, = torch.autograd.grad(
-        outputs=critic_out.sum(),
-        inputs=interp,
+        outputs=real_pred.sum(),
+        inputs=real_img,
         create_graph=True,
+        retain_graph=True,
     )
-    return ((grad.flatten(1).norm(2, dim=1) - 1) ** 2).mean()
+    return grad.pow(2).flatten(1).sum(1).mean()
 
 
 # ── Generator auxiliary losses ────────────────────────────────────────────────

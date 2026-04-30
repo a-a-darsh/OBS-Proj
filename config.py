@@ -70,7 +70,7 @@ class Config:
 
     # ── Loss weights ──────────────────────────────────────────────────
     lambda_adv: float = 1.0
-    lambda_r1: float = 10.0  # WGAN-GP gradient penalty weight
+    lambda_r1: float = 10.0
     lambda_cycle: float = 10.0
     lambda_stage: float = 5.0
     lambda_div: float = 1.0

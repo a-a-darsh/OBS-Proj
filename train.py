@@ -26,7 +26,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 from tqdm import tqdm
 
@@ -34,7 +34,7 @@ from config import Config
 from model import CharacterGenerator, MultiStageDiscriminator, StagePredictor
 from data import CharacterEvolutionDataset
 from losses import (
-    adv_loss_g, adv_loss_d, gradient_penalty,
+    adv_loss_g, adv_loss_d, r1_penalty,
     cycle_loss, diversity_loss, PerceptualLoss,
     complexity_weighted_recon, stage_consistency_loss,
 )
@@ -127,12 +127,7 @@ def train(cfg: Config, resume: str | None = None):
     val_set   = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
                                           split="val", max_refs=cfg.max_refs,
                                           num_stages=cfg.num_stages)
-    sampler = WeightedRandomSampler(
-        weights=train_set.sample_weights,
-        num_samples=len(train_set),
-        replacement=True,
-    )
-    loader = DataLoader(train_set, batch_size=cfg.batch_size, sampler=sampler,
+    loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True,
                         num_workers=cfg.num_workers, pin_memory=True,
                         drop_last=True, persistent_workers=cfg.num_workers > 0)
     print(f"Train pairs: {len(train_set):,}  Val chars: {len(val_set.chars):,}")
@@ -178,7 +173,7 @@ def train(cfg: Config, resume: str | None = None):
             mask_f = src_mask.float().view(B, src_imgs.shape[1], 1, 1, 1)
             mean_src = (src_imgs * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
-            # ── Discriminator / critic step ──────────────────────
+            # ── Discriminator step ──────────────────────────────
             with torch.no_grad():
                 fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
             real_pred = D(tgt_img, tgt_stage)
@@ -190,13 +185,11 @@ def train(cfg: Config, resume: str | None = None):
             p_real_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
             d_loss = d_loss + p_real_loss
 
-            # WGAN-GP: lazy gradient penalty on interpolated real/fake points
+            # Lazy R1: only build input-grad graph on steps where R1 fires
             if d_step % cfg.r1_every == 0:
-                alpha = torch.rand(B, 1, 1, 1, device=device)
-                interp = (alpha * tgt_img.detach() +
-                          (1 - alpha) * fake_tgt_d.detach()).requires_grad_(True)
-                gp = gradient_penalty(D(interp, tgt_stage), interp)
-                d_loss = d_loss + cfg.lambda_r1 * gp
+                tgt_img_r1 = tgt_img.detach().requires_grad_(True)
+                r1 = r1_penalty(D(tgt_img_r1, tgt_stage), tgt_img_r1)
+                d_loss = d_loss + (cfg.lambda_r1 / 2) * r1
 
             opt_D.zero_grad()
             d_loss.backward()
@@ -261,7 +254,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", default=None)
     parser.add_argument("--checkpoint_dir", default=None)
     parser.add_argument("--sample_dir", default=None)
-    parser.add_argument("--resume",     default=None,
+    parser.add_argument("--resume", default=None,
                         help="path to checkpoint to resume from")
     args = parser.parse_args()
 
