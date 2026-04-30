@@ -156,6 +156,7 @@ class CharacterEvolutionDataset(Dataset):
                  split: str = "train", val_fraction: float = 0.05,
                  seed: int = 42, max_refs: int = 4,
                  num_stages: int = 7,
+                 min_pair_count: int = 10,
                  json_path: str = _DEFAULT_JSON):
         self.max_refs = max_refs
         self.image_size = image_size
@@ -171,18 +172,18 @@ class CharacterEvolutionDataset(Dataset):
             transforms.Normalize([0.5], [0.5]),   # → [-1, 1]
         ]
         if split == "train":
-            # fill=255 keeps background white during spatial transforms
             self.transform = transforms.Compose(_base + [
-                transforms.RandomRotation(degrees=8, fill=255),
-                transforms.RandomAffine(
-                    degrees=0, translate=(0.05, 0.05),
-                    scale=(0.95, 1.05), shear=3, fill=255,
-                ),
-                transforms.RandomApply([transforms.GaussianBlur(kernel_size=3)], p=0.2),
-            ] + _to_tensor + [
-                # value=1.0 in [-1,1] space = white background
-                transforms.RandomErasing(p=0.15, scale=(0.02, 0.08), value=1.0),
-            ])
+                transforms.RandomApply([
+                    transforms.RandomRotation(degrees=5, fill=255),
+                ], p=0.4),
+                transforms.RandomApply([
+                    # Crop then resize back — simulates centering variation
+                    transforms.RandomResizedCrop(
+                        image_size, scale=(0.85, 1.0), ratio=(0.92, 1.08),
+                        interpolation=transforms.InterpolationMode.BICUBIC,
+                    ),
+                ], p=0.4),
+            ] + _to_tensor)
         else:
             self.transform = transforms.Compose(_base + _to_tensor)
 
@@ -247,13 +248,24 @@ class CharacterEvolutionDataset(Dataset):
         self.chars = chars[n_val:] if split == "train" else chars[:n_val]
 
         # ── Build all valid (src_stage, tgt_stage) pairs ──────────────
-        self.pairs: list = []
+        # All forward pairs (s < t): any earlier era → any later era.
+        from collections import Counter
+        raw_pairs: list = []
         for char_idx, char in enumerate(self.chars):
-            avail = list(char["stages"].keys())
-            for s in avail:
-                for t in avail:
-                    if s != t:
-                        self.pairs.append((char_idx, s, t))
+            avail = sorted(char["stages"].keys())
+            for i, s in enumerate(avail):
+                for t in avail[i + 1:]:
+                    raw_pairs.append((char_idx, s, t))
+
+        # Count samples per (s, t) bucket; drop buckets below threshold.
+        bucket_counts = Counter((s, t) for _, s, t in raw_pairs)
+        valid_buckets = {k for k, v in bucket_counts.items() if v >= min_pair_count}
+        self.pairs = [(c, s, t) for c, s, t in raw_pairs if (s, t) in valid_buckets]
+
+        # Weight each sample so every surviving bucket is equally likely.
+        self.sample_weights = [
+            1.0 / bucket_counts[(s, t)] for _, s, t in self.pairs
+        ]
 
     # ── Helpers ───────────────────────────────────────────────────────
     def _load(self, path: str) -> torch.Tensor:

@@ -26,7 +26,7 @@ import argparse
 import torch
 import torch.nn.functional as F
 from torch.amp import autocast, GradScaler
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.utils import save_image
 from tqdm import tqdm
 
@@ -42,12 +42,13 @@ from losses import (
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def save_checkpoint(G, D, P, opt_G, opt_D, epoch: int, cfg: Config):
+def save_checkpoint(G, D, P, opt_G, opt_D, opt_P, epoch: int, cfg: Config):
     path = os.path.join(cfg.checkpoint_dir, f"ckpt_epoch{epoch:04d}.pt")
     torch.save({
         "epoch": epoch,
         "G": G.state_dict(), "D": D.state_dict(), "P": P.state_dict(),
         "opt_G": opt_G.state_dict(), "opt_D": opt_D.state_dict(),
+        "opt_P": opt_P.state_dict(),
     }, path)
     print(f"  → saved {path}")
 
@@ -75,16 +76,12 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
                 real_row.append(torch.ones(1, cfg.image_size, cfg.image_size,
                                            device=device))   # white placeholder
 
-        # Generate the full sequence from the latest available stage
-        if 4 in available:
-            latest = 4
-        else:
-            latest = max(available.keys())
-        src_img = val_set._load(random.choice(available[latest])).unsqueeze(0).to(device)  # (1, C, H, W)
-        # Match training shape: (B, max_refs, C, H, W) with a mask
+        # Generate the full sequence from the earliest available stage (matches training)
+        earliest = min(available.keys())
+        src_img = val_set._load(random.choice(available[earliest])).unsqueeze(0).to(device)
         src_img_refs = src_img.unsqueeze(1)  # (1, 1, C, H, W)
         src_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
-        src_stage_t = torch.tensor([latest], device=device)
+        src_stage_t = torch.tensor([earliest], device=device)
 
         gen_row = []
         for t in range(cfg.num_stages):
@@ -104,13 +101,18 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
 
 # ── Main training loop ────────────────────────────────────────────────────────
 
-def load_checkpoint(path: str, G, D, P, opt_G, opt_D, device) -> int:
+def load_checkpoint(path: str, G, D, P, opt_G, opt_D, opt_P, device) -> int:
     ckpt = torch.load(path, map_location=device)
     G.load_state_dict(ckpt["G"])
     D.load_state_dict(ckpt["D"])
     P.load_state_dict(ckpt["P"])
-    opt_G.load_state_dict(ckpt["opt_G"])
-    opt_D.load_state_dict(ckpt["opt_D"])
+    for opt, key in [(opt_G, "opt_G"), (opt_D, "opt_D"), (opt_P, "opt_P")]:
+        if key not in ckpt:
+            continue
+        try:
+            opt.load_state_dict(ckpt[key])
+        except ValueError:
+            print(f"  ! skipping {key} state (parameter group mismatch — optimizer will restart)")
     print(f"  ← resumed from {path} (epoch {ckpt['epoch']})")
     return ckpt["epoch"]
 
@@ -127,11 +129,18 @@ def train(cfg: Config, resume: str | None = None):
     # ── Data ──────────────────────────────────────────────────────────
     train_set = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
                                           split="train", max_refs=cfg.max_refs,
-                                          num_stages=cfg.num_stages)
+                                          num_stages=cfg.num_stages,
+                                          min_pair_count=cfg.min_pair_count)
     val_set   = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
                                           split="val", max_refs=cfg.max_refs,
-                                          num_stages=cfg.num_stages)
-    loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True,
+                                          num_stages=cfg.num_stages,
+                                          min_pair_count=cfg.min_pair_count)
+    sampler = WeightedRandomSampler(
+        weights=train_set.sample_weights,
+        num_samples=len(train_set),
+        replacement=True,
+    )
+    loader = DataLoader(train_set, batch_size=cfg.batch_size, sampler=sampler,
                         num_workers=cfg.num_workers, pin_memory=True,
                         drop_last=True, persistent_workers=cfg.num_workers > 0)
     print(f"Train pairs: {len(train_set):,}  Val chars: {len(val_set.chars):,}")
@@ -143,18 +152,13 @@ def train(cfg: Config, resume: str | None = None):
 
     perceptual = PerceptualLoss(device)
 
-    # G and P share an optimiser — P's real-image accuracy guides G's stage signal
-    opt_G = torch.optim.Adam(
-        list(G.parameters()) + list(P.parameters()),
-        lr=cfg.lr_g, betas=(cfg.beta1, cfg.beta2),
-    )
-    opt_D = torch.optim.Adam(
-        D.parameters(), lr=cfg.lr_d, betas=(cfg.beta1, cfg.beta2),
-    )
+    opt_G = torch.optim.Adam(G.parameters(), lr=cfg.lr_g, betas=(cfg.beta1, cfg.beta2))
+    opt_D = torch.optim.Adam(D.parameters(), lr=cfg.lr_d, betas=(cfg.beta1, cfg.beta2))
+    opt_P = torch.optim.Adam(P.parameters(), lr=cfg.lr_g, betas=(cfg.beta1, cfg.beta2))
 
     start_epoch = 0
     if resume:
-        start_epoch = load_checkpoint(resume, G, D, P, opt_G, opt_D, device)
+        start_epoch = load_checkpoint(resume, G, D, P, opt_G, opt_D, opt_P, device)
 
     d_step = 0
 
@@ -185,10 +189,6 @@ def train(cfg: Config, resume: str | None = None):
 
             d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
 
-            # Predictor trained on real images in D step (no G gradients needed)
-            p_real_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
-            d_loss = d_loss + p_real_loss
-
             # Lazy R1: only build input-grad graph on steps where R1 fires
             if d_step % cfg.r1_every == 0:
                 tgt_img_r1 = tgt_img.detach().requires_grad_(True)
@@ -200,6 +200,12 @@ def train(cfg: Config, resume: str | None = None):
             opt_D.step()
             d_step += 1
 
+            # ── Predictor step (real images only) ───────────────
+            p_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
+            opt_P.zero_grad()
+            p_loss.backward()
+            opt_P.step()
+
             # ── Generator step ──────────────────────────────────
             noise1 = torch.randn(B, cfg.latent_dim, device=device)
             noise2 = torch.randn(B, cfg.latent_dim, device=device)
@@ -210,7 +216,7 @@ def train(cfg: Config, resume: str | None = None):
             # 1. Adversarial
             g_loss = cfg.lambda_adv * adv_loss_g(fake_pred)
 
-            # 2. Stage consistency  (P already warmed up from D step)
+            # 2. Stage consistency — gradient flows through G only; P not updated
             g_loss += cfg.lambda_stage * stage_consistency_loss(P, fake_tgt, tgt_stage)
 
             # 3. Cycle consistency
@@ -242,7 +248,7 @@ def train(cfg: Config, resume: str | None = None):
             save_samples(G, val_set, epoch, cfg, device)
 
         if epoch % cfg.save_every == 0:
-            save_checkpoint(G, D, P, opt_G, opt_D, epoch, cfg)
+            save_checkpoint(G, D, P, opt_G, opt_D, opt_P, epoch, cfg)
 
     print("Training complete.")
 
