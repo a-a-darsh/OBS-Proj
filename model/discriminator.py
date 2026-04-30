@@ -8,22 +8,28 @@ correct branch without redundant masking.
 """
 import torch
 import torch.nn as nn
-from .blocks import DownBlock
+from .blocks import DownBlock, SelfAttention
 
 
 class PatchDiscriminator(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         nf = cfg.nf
-        self.net = nn.Sequential(
+        self.blocks = nn.ModuleList([
             DownBlock(cfg.in_channels, nf,     normalize=False),
             DownBlock(nf,              nf * 2),
             DownBlock(nf * 2,          nf * 4),
-            nn.Conv2d(nf * 4, 1, 4, padding=1),
-        )
+        ])
+        # Applied at 32×32 (after block 1, channels=nf*2)
+        self.attn = SelfAttention(nf * 2)
+        self.head = nn.Conv2d(nf * 4, 1, 4, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        for i, block in enumerate(self.blocks):
+            x = block(x)
+            if i == 1:
+                x = self.attn(x)
+        return self.head(x)
 
 
 class MultiStageDiscriminator(nn.Module):

@@ -135,6 +135,32 @@ class StyledUpBlock(nn.Module):
         return self.act(self.noise(self.conv(x, style)))
 
 
+class SelfAttention(nn.Module):
+    """
+    SAGAN-style spatial self-attention.
+    Applied at an intermediate feature resolution so the model can relate
+    spatially distant strokes/components to each other.
+    gamma starts at 0 so the block is a no-op at init and learns its influence.
+    """
+    def __init__(self, channels: int):
+        super().__init__()
+        mid = max(channels // 8, 1)
+        self.query = nn.Conv2d(channels, mid, 1, bias=False)
+        self.key   = nn.Conv2d(channels, mid, 1, bias=False)
+        self.value = nn.Conv2d(channels, channels, 1, bias=False)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        self._scale = mid ** -0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        q = self.query(x).view(B, -1, H * W).permute(0, 2, 1)   # (B, HW, mid)
+        k = self.key(x).view(B, -1, H * W)                        # (B, mid, HW)
+        attn = torch.softmax(torch.bmm(q, k) * self._scale, dim=-1)  # (B, HW, HW)
+        v = self.value(x).view(B, -1, H * W)                      # (B, C, HW)
+        out = torch.bmm(v, attn.permute(0, 2, 1)).view(B, C, H, W)
+        return x + self.gamma * out
+
+
 class FourierTimeEmbed(nn.Module):
     """
     Converts a normalized year value t ∈ [0, 1] to a dense embedding via

@@ -14,7 +14,7 @@ losing its semantic identity.
 """
 import torch
 import torch.nn as nn
-from .blocks import DownBlock, StyledResBlock, StyledUpBlock
+from .blocks import DownBlock, StyledResBlock, StyledUpBlock, SelfAttention
 from .mapper import StageMapper
 from config import STAGE_YEARS, YEAR_MIN, YEAR_MAX
 
@@ -38,11 +38,18 @@ class ContentEncoder(nn.Module):
             DownBlock(nf * 2, nf * 4),
             DownBlock(nf * 4, nf * 8),
         ])
+        # Applied at 16×16 (after block 2, channels=nf*4)
+        self.attn = SelfAttention(nf * 4)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        for block in self.blocks:
+    def forward(self, x: torch.Tensor):
+        skips = []
+        for i, block in enumerate(self.blocks):
             x = block(x)
-        return x   # (B, 8*nf, 4, 4) for 64×64 input
+            if i == 2:
+                x = self.attn(x)
+            skips.append(x)
+        # skips: [64×64 nf, 32×32 nf*2, 16×16 nf*4, 8×8 nf*8]
+        return x, skips
 
 
 class StyledDecoder(nn.Module):
@@ -63,6 +70,17 @@ class StyledDecoder(nn.Module):
             StyledUpBlock(nf * 2, nf,     sd),
             StyledUpBlock(nf,     nf // 2, sd),
         ])
+        # Applied at 16×16 (after up_blocks[0], channels=nf*4)
+        self.attn = SelfAttention(nf * 4)
+
+        # U-Net skip projections: 1×1 convs fuse encoder features into decoder
+        # Order matches injection depth: [bottleneck, 16×16, 32×32, 64×64]
+        self.skip_projs = nn.ModuleList([
+            nn.Conv2d(nf * 8, nf * 8, 1),
+            nn.Conv2d(nf * 4, nf * 4, 1),
+            nn.Conv2d(nf * 2, nf * 2, 1),
+            nn.Conv2d(nf,     nf,     1),
+        ])
 
         self.to_img = nn.Sequential(
             nn.Conv2d(nf // 2, cfg.in_channels, 1),
@@ -70,17 +88,27 @@ class StyledDecoder(nn.Module):
         )
 
     def forward(self, content: torch.Tensor,
-                styles: torch.Tensor) -> torch.Tensor:
+                styles: torch.Tensor,
+                skips: list = None) -> torch.Tensor:
         # styles: (B, n_style_layers, style_dim)
-        # n_style_layers = n_res_blocks*2 + 4  (12 total)
         x = content
+        if skips is not None:
+            x = x + self.skip_projs[0](skips[3])   # inject 8×8 bottleneck skip
         idx = 0
         for res in self.res_blocks:
             x = res(x, styles[:, idx], styles[:, idx + 1])
             idx += 2
-        for up in self.up_blocks:
+        for i, up in enumerate(self.up_blocks):
             x = up(x, styles[:, idx])
             idx += 1
+            if i == 0:
+                x = self.attn(x)
+                if skips is not None:
+                    x = x + self.skip_projs[1](skips[2])   # 16×16
+            elif i == 1 and skips is not None:
+                x = x + self.skip_projs[2](skips[1])       # 32×32
+            elif i == 2 and skips is not None:
+                x = x + self.skip_projs[3](skips[0])       # 64×64
         return self.to_img(x)
 
 
@@ -121,13 +149,19 @@ class CharacterGenerator(nn.Module):
             noise = torch.randn(B, self.latent_dim, device=src_imgs.device)
 
         # Encode every reference image, then mean-pool over valid ones
-        encoded = self.encoder(src_imgs.reshape(B * R, C, H, W))
-        _, fc, fH, fW = encoded.shape
-        encoded = encoded.reshape(B, R, fc, fH, fW)
+        content_flat, skips_flat = self.encoder(src_imgs.reshape(B * R, C, H, W))
+        _, fc, fH, fW = content_flat.shape
+        encoded = content_flat.reshape(B, R, fc, fH, fW)
         mask_f  = src_mask.float().view(B, R, 1, 1, 1)
         content = (encoded * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
+
+        # Pool each skip map over refs the same way
+        skips = []
+        for s in skips_flat:
+            s = s.reshape(B, R, *s.shape[1:])
+            skips.append((s * mask_f).sum(1) / mask_f.sum(1).clamp(min=1))
 
         src_year = stage_to_year(src_stage)
         tgt_year = stage_to_year(tgt_stage)
         styles   = self.mapper(src_stage, tgt_stage, src_year, tgt_year, noise)
-        return   self.decoder(content, styles)
+        return   self.decoder(content, styles, skips)
