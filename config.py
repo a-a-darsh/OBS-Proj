@@ -55,12 +55,12 @@ class Config:
 
     # ── Training ──────────────────────────────────────────────────────
     batch_size: int = 64
-    n_epochs: int = 200
-    lr_g: float = 1e-4
+    n_epochs: int = 2000
+    lr_g: float = 2e-3
     lr_d: float = 1e-2
     beta1: float = 0.0
     beta2: float = 0.99
-    r1_every: int = 2  # apply R1 penalty every N discriminator steps
+    r1_every: int = 8  # apply R1 penalty every N discriminator steps
     save_every: int = 2  # checkpoint every N epochs
     sample_every: int = 1  # save sample images every N epochs
     checkpoint_dir: str = "checkpoints"
@@ -82,8 +82,9 @@ class Config:
     # ── Inference ─────────────────────────────────────────────────────
     unicode_font: str = r"C:\Windows\Fonts\msyh.ttc"  # MS YaHei fallback
     device: str = "cuda"
+    lr_decay: str = "cosine"         # "cosine" | "none"
+    lr_min_factor: float = 0.01     # floor LR as fraction of initial (cosine only)
     use_amp: bool = True            # BF16 autocast — free speedup on 5090
     weighted_sampling: bool = False  # balance bucket frequencies via WeightedRandomSampler
     dropout_p: float = 0.2           # channel dropout after each DownBlock (0.0 = off)
-    use_spectral_norm: bool = True   # spectral norm on discriminator weights
     use_compile: bool = False       # torch.compile requires Triton (Linux only)

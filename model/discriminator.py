@@ -8,7 +8,6 @@ correct branch without redundant masking.
 """
 import torch
 import torch.nn as nn
-from torch.nn.utils import spectral_norm as apply_sn
 from .blocks import DownBlock, SelfAttention
 
 
@@ -17,16 +16,14 @@ class PatchDiscriminator(nn.Module):
         super().__init__()
         nf = cfg.nf
         dp = cfg.dropout_p
-        sn = cfg.use_spectral_norm
         self.blocks = nn.ModuleList([
-            DownBlock(cfg.in_channels, nf,     norm=None,       spectral_norm=sn),
-            DownBlock(nf,              nf * 2, norm='instance', dropout_p=dp, spectral_norm=sn),
-            DownBlock(nf * 2,          nf * 4, norm='instance', dropout_p=dp, spectral_norm=sn),
+            DownBlock(cfg.in_channels, nf,     norm=None),
+            DownBlock(nf,              nf * 2, norm='instance', dropout_p=dp),
+            DownBlock(nf * 2,          nf * 4, norm='instance', dropout_p=dp),
         ])
         # Applied at 32×32 (after block 1, channels=nf*2)
-        self.attn = SelfAttention(nf * 2, spectral_norm=sn)
-        head = nn.Conv2d(nf * 4, 1, 4, padding=1)
-        self.head = apply_sn(head) if sn else head
+        self.attn = SelfAttention(nf * 2)
+        self.head = nn.Conv2d(nf * 4, 1, 4, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for i, block in enumerate(self.blocks):

@@ -247,8 +247,7 @@ class CharacterEvolutionDataset(Dataset):
         self.chars = chars[n_val:] if split == "train" else chars[:n_val]
 
         # ── Build all valid (src_stage, tgt_stage) pairs ──────────────
-        # src is always the earliest available stage for the character;
-        # tgt can be any later stage.
+        # src is always the earliest available stage for the character.
         from collections import Counter
         raw_pairs: list = []
         for char_idx, char in enumerate(self.chars):

@@ -174,6 +174,20 @@ def train(cfg: Config, resume: str | None = None):
     if resume:
         start_epoch = load_checkpoint(resume, G, D, P, opt_G, opt_D, opt_P, device)
 
+    def _make_scheduler(opt, base_lr):
+        if cfg.lr_decay == "cosine":
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt,
+                T_max=cfg.n_epochs,
+                eta_min=base_lr * cfg.lr_min_factor,
+                last_epoch=start_epoch - 1,
+            )
+        return None
+
+    sched_G = _make_scheduler(opt_G, cfg.lr_g)
+    sched_D = _make_scheduler(opt_D, cfg.lr_d)
+    sched_P = _make_scheduler(opt_P, cfg.lr_g)
+
     d_step = 0
     # BF16 autocast kwargs — passed to autocast() each step.
     # BF16 has the same exponent range as FP32 so no GradScaler is needed.
@@ -264,6 +278,10 @@ def train(cfg: Config, resume: str | None = None):
         tqdm.write(f"Epoch {epoch:4d}/{cfg.n_epochs}  "
                    f"D={epoch_d_loss / n_batches:.4f}  "
                    f"G={epoch_g_loss / n_batches:.4f}")
+
+        for sched in (sched_G, sched_D, sched_P):
+            if sched is not None:
+                sched.step()
 
         if epoch % cfg.sample_every == 0:
             save_samples(G, val_set, epoch, cfg, device)
