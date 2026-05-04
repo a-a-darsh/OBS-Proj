@@ -32,12 +32,11 @@ class ContentEncoder(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         nf = cfg.nf
-        dp = cfg.dropout_p
         self.blocks = nn.ModuleList([
-            DownBlock(cfg.in_channels, nf,     norm=None),
-            DownBlock(nf,              nf * 2, norm='instance', dropout_p=dp),
-            DownBlock(nf * 2,          nf * 4, norm='instance', dropout_p=dp),
-            DownBlock(nf * 4,          nf * 8, norm='instance', dropout_p=dp),
+            DownBlock(cfg.in_channels, nf, normalize=False),
+            DownBlock(nf,     nf * 2),
+            DownBlock(nf * 2, nf * 4),
+            DownBlock(nf * 4, nf * 8),
         ])
         # Applied at 16×16 (after block 2, channels=nf*4)
         self.attn = SelfAttention(nf * 4)
@@ -75,12 +74,12 @@ class StyledDecoder(nn.Module):
         self.attn = SelfAttention(nf * 4)
 
         # U-Net skip projections: 1×1 convs fuse encoder features into decoder
-        # Order matches injection depth: [bottleneck, 16×16, 32×32]
-        # 64×64 skip omitted — too close to pixel-level, causes input shadow in output.
+        # Order matches injection depth: [bottleneck, 16×16, 32×32, 64×64]
         self.skip_projs = nn.ModuleList([
             nn.Conv2d(nf * 8, nf * 8, 1),
             nn.Conv2d(nf * 4, nf * 4, 1),
             nn.Conv2d(nf * 2, nf * 2, 1),
+            nn.Conv2d(nf,     nf,     1),
         ])
 
         self.to_img = nn.Sequential(
@@ -108,6 +107,8 @@ class StyledDecoder(nn.Module):
                     x = x + self.skip_projs[1](skips[2])   # 16×16
             elif i == 1 and skips is not None:
                 x = x + self.skip_projs[2](skips[1])       # 32×32
+            elif i == 2 and skips is not None:
+                x = x + self.skip_projs[3](skips[0])       # 64×64
         return self.to_img(x)
 
 
@@ -147,23 +148,18 @@ class CharacterGenerator(nn.Module):
         if noise is None:
             noise = torch.randn(B, self.latent_dim, device=src_imgs.device)
 
-        # Encode every reference image, then max-pool over valid ones.
-        # Max-pool preserves the strongest feature activation from any single
-        # reference rather than averaging, which prevents stroke patterns from
-        # washing out when refs show the character in different layouts.
+        # Encode every reference image, then mean-pool over valid ones
         content_flat, skips_flat = self.encoder(src_imgs.reshape(B * R, C, H, W))
         _, fc, fH, fW = content_flat.shape
-        invalid = ~src_mask                                          # (B, R) bool
         encoded = content_flat.reshape(B, R, fc, fH, fW)
-        encoded = encoded.masked_fill(invalid.view(B, R, 1, 1, 1), float('-inf'))
-        content = encoded.max(dim=1).values
+        mask_f  = src_mask.float().view(B, R, 1, 1, 1)
+        content = (encoded * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
-        # Max-pool each skip map over refs the same way
+        # Pool each skip map over refs the same way
         skips = []
         for s in skips_flat:
             s = s.reshape(B, R, *s.shape[1:])
-            s = s.masked_fill(invalid.view(B, R, 1, 1, 1), float('-inf'))
-            skips.append(s.max(dim=1).values)
+            skips.append((s * mask_f).sum(1) / mask_f.sum(1).clamp(min=1))
 
         src_year = stage_to_year(src_stage)
         tgt_year = stage_to_year(tgt_stage)

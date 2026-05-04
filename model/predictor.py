@@ -15,12 +15,11 @@ class StagePredictor(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         nf = cfg.nf
-        dp = cfg.dropout_p
         self.net = nn.Sequential(
-            DownBlock(cfg.in_channels, nf,     norm=None),
-            DownBlock(nf,              nf * 2, norm='instance', dropout_p=dp),
-            DownBlock(nf * 2,          nf * 4, norm='instance', dropout_p=dp),
-            DownBlock(nf * 4,          nf * 8, norm='instance', dropout_p=dp),
+            DownBlock(cfg.in_channels, nf,     normalize=False),
+            DownBlock(nf,              nf * 2),
+            DownBlock(nf * 2,          nf * 4),
+            DownBlock(nf * 4,          nf * 8),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(nf * 8, nf * 4),
