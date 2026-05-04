@@ -97,7 +97,8 @@ def stage_deviation_rationality(
 
 
 def build_reference_matrix(dataset, n_chars: int = 200,
-                            image_size: int = 64) -> np.ndarray:
+                            image_size: int = 64,
+                            num_stages: int = 7) -> np.ndarray:
     """
     Compute expected pairwise cosine-similarity matrix from real data.
     Used once after dataset loading; store and reuse for evaluation.
@@ -113,9 +114,8 @@ def build_reference_matrix(dataset, n_chars: int = 200,
         transforms.Normalize([0.5], [0.5]),
     ])
 
-    n_stages = 5
-    sum_mat = np.zeros((n_stages, n_stages))
-    count_mat = np.zeros((n_stages, n_stages))
+    sum_mat = np.zeros((num_stages, num_stages))
+    count_mat = np.zeros((num_stages, num_stages))
 
     sample_chars = random.sample(dataset.chars, min(n_chars, len(dataset.chars)))
     for char in sample_chars:
@@ -144,12 +144,12 @@ def build_reference_matrix(dataset, n_chars: int = 200,
 # ── Predictor accuracy ────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def predictor_accuracy(predictor, loader, device) -> float:
+def predictor_accuracy(predictor, loader, device, num_stages: int = 7) -> float:
     """Fraction of real images correctly classified by StagePredictor."""
     predictor.eval()
     correct = total = 0
     for batch in loader:
-        for stage_idx in range(5):
+        for stage_idx in range(num_stages):
             imgs = batch["tgt_img"][batch["tgt_stage"] == stage_idx].to(device)
             if len(imgs) == 0:
                 continue

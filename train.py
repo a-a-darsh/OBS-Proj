@@ -25,7 +25,7 @@ import random
 import argparse
 import torch
 import torch.nn.functional as F
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.utils import save_image
 from tqdm import tqdm
@@ -62,8 +62,9 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
     """
     G.eval()
     rows = []
-    n_show = min(8, len(val_set.chars))
-    for char_info in val_set.chars[:n_show]:
+    rich_chars = [c for c in val_set.chars if len(c["stages"]) >= 4]
+    n_show = min(8, len(rich_chars))
+    for char_info in rich_chars[:n_show]:
         available = char_info["stages"]
 
         # Show real images for each stage (blank if missing)
@@ -150,6 +151,13 @@ def train(cfg: Config, resume: str | None = None):
     D = MultiStageDiscriminator(cfg).to(device)
     P = StagePredictor(cfg).to(device)
 
+    # torch.compile fuses kernels for faster execution.
+    # Warmup takes a few minutes on the first epoch — normal.
+    if cfg.use_amp and hasattr(torch, "compile"):
+        G = torch.compile(G)
+        D = torch.compile(D)
+        P = torch.compile(P)
+
     perceptual = PerceptualLoss(device)
 
     opt_G = torch.optim.Adam(G.parameters(), lr=cfg.lr_g, betas=(cfg.beta1, cfg.beta2))
@@ -161,6 +169,9 @@ def train(cfg: Config, resume: str | None = None):
         start_epoch = load_checkpoint(resume, G, D, P, opt_G, opt_D, opt_P, device)
 
     d_step = 0
+    # BF16 autocast kwargs — passed to autocast() each step.
+    # BF16 has the same exponent range as FP32 so no GradScaler is needed.
+    amp = dict(device_type="cuda", dtype=torch.bfloat16, enabled=cfg.use_amp)
 
     for epoch in tqdm(range(start_epoch + 1, cfg.n_epochs + 1), desc="Epochs"):
         G.train()
@@ -169,7 +180,7 @@ def train(cfg: Config, resume: str | None = None):
         epoch_d_loss = epoch_g_loss = 0.0
         n_batches = 0
 
-        for batch in tqdm(loader, desc=f"Epoch {epoch}", leave=False):
+        for batch in (pbar := tqdm(loader, desc=f"Epoch {epoch}", leave=False)):
             src_imgs = batch["src_imgs"].to(device)
             src_mask = batch["src_mask"].to(device)
             tgt_img = batch["tgt_img"].to(device)
@@ -182,27 +193,28 @@ def train(cfg: Config, resume: str | None = None):
             mean_src = (src_imgs * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
             # ── Discriminator step ──────────────────────────────
-            with torch.no_grad():
-                fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
-            real_pred = D(tgt_img, tgt_stage)
-            fake_pred = D(fake_tgt_d.detach(), tgt_stage)
+            with autocast(**amp):
+                with torch.no_grad():
+                    fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
+                real_pred = D(tgt_img, tgt_stage)
+                fake_pred = D(fake_tgt_d.detach(), tgt_stage)
+                d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
 
-            d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
-
-            # Lazy R1: only build input-grad graph on steps where R1 fires
+            # R1 runs outside autocast: create_graph=True requires float32 precision
             if d_step % cfg.r1_every == 0:
                 tgt_img_r1 = tgt_img.detach().requires_grad_(True)
                 r1 = r1_penalty(D(tgt_img_r1, tgt_stage), tgt_img_r1)
                 d_loss = d_loss + (cfg.lambda_r1 / 2) * r1
 
-            opt_D.zero_grad()
+            opt_D.zero_grad(set_to_none=True)
             d_loss.backward()
             opt_D.step()
             d_step += 1
 
             # ── Predictor step (real images only) ───────────────
-            p_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
-            opt_P.zero_grad()
+            with autocast(**amp):
+                p_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
+            opt_P.zero_grad(set_to_none=True)
             p_loss.backward()
             opt_P.step()
 
@@ -210,35 +222,38 @@ def train(cfg: Config, resume: str | None = None):
             noise1 = torch.randn(B, cfg.latent_dim, device=device)
             noise2 = torch.randn(B, cfg.latent_dim, device=device)
 
-            fake_tgt = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
-            fake_pred = D(fake_tgt, tgt_stage)
+            with autocast(**amp):
+                fake_tgt = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
+                fake_pred = D(fake_tgt, tgt_stage)
 
-            # 1. Adversarial
-            g_loss = cfg.lambda_adv * adv_loss_g(fake_pred)
+                # 1. Adversarial
+                g_loss = cfg.lambda_adv * adv_loss_g(fake_pred)
 
-            # 2. Stage consistency — gradient flows through G only; P not updated
-            g_loss += cfg.lambda_stage * stage_consistency_loss(P, fake_tgt, tgt_stage)
+                # 2. Stage consistency — gradient flows through G only; P not updated
+                g_loss += cfg.lambda_stage * stage_consistency_loss(P, fake_tgt, tgt_stage)
 
-            # 3. Cycle consistency
-            recon_src = G(fake_tgt, tgt_stage, src_stage, noise1)
-            g_loss += cfg.lambda_cycle * cycle_loss(recon_src, mean_src)
-            g_loss += cfg.lambda_percep * perceptual(recon_src, mean_src)
+                # 3. Cycle consistency
+                recon_src = G(fake_tgt, tgt_stage, src_stage, noise1)
+                g_loss += cfg.lambda_cycle * cycle_loss(recon_src, mean_src)
+                g_loss += cfg.lambda_percep * perceptual(recon_src, mean_src)
 
-            # 4. Diversity  (two noise samples should differ)
-            fake_tgt2 = G(src_imgs, src_stage, tgt_stage, noise2, src_mask=src_mask)
-            g_loss += cfg.lambda_div * diversity_loss(fake_tgt, fake_tgt2)
+                # 4. Diversity  (two noise samples3 should differ)
+                fake_tgt2 = G(src_imgs, src_stage, tgt_stage, noise2, src_mask=src_mask)
+                g_loss += cfg.lambda_div * diversity_loss(fake_tgt, fake_tgt2)
 
-            # 5. Complexity-weighted reconstruction + perceptual vs. ground-truth target
-            g_loss += cfg.lambda_recon * complexity_weighted_recon(fake_tgt, tgt_img)
-            g_loss += cfg.lambda_percep * perceptual(fake_tgt, tgt_img)
+                # 5. Complexity-weighted reconstruction + perceptual vs. ground-truth target
+                g_loss += cfg.lambda_recon * complexity_weighted_recon(fake_tgt, tgt_img)
+                g_loss += cfg.lambda_percep * perceptual(fake_tgt, tgt_img)
 
-            opt_G.zero_grad()
+            opt_G.zero_grad(set_to_none=True)
             g_loss.backward()
             opt_G.step()
 
             epoch_d_loss += d_loss.item()
             epoch_g_loss += g_loss.item()
             n_batches += 1
+            pbar.set_postfix(D=f"{epoch_d_loss/n_batches:.4f}",
+                             G=f"{epoch_g_loss/n_batches:.4f}")
 
         tqdm.write(f"Epoch {epoch:4d}/{cfg.n_epochs}  "
                    f"D={epoch_d_loss / n_batches:.4f}  "
