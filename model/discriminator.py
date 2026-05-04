@@ -17,8 +17,8 @@ class PatchDiscriminator(nn.Module):
         nf = cfg.nf
         self.blocks = nn.ModuleList([
             DownBlock(cfg.in_channels, nf,     norm=None),
-            DownBlock(nf,              nf * 2, norm='instance'),
-            DownBlock(nf * 2,          nf * 4, norm='instance'),
+            DownBlock(nf,              nf * 2, norm='dropout'),
+            DownBlock(nf * 2,          nf * 4, norm='dropout'),
         ])
         # Applied at 32×32 (after block 1, channels=nf*2)
         self.attn = SelfAttention(nf * 2)

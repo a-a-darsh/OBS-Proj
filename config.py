@@ -51,7 +51,7 @@ class Config:
     n_res_blocks: int = 4         # styled residual blocks at bottleneck
     n_enc_blocks: int = 4         # encoder downsampling blocks (64→32→16→8→4)
     # n_style_layers = n_res_blocks * 2 + n_enc_blocks = 12
-    n_style_layers: int = 12
+    n_style_layers: int = 16
 
     # ── Training ──────────────────────────────────────────────────────
     batch_size: int = 32
@@ -73,13 +73,15 @@ class Config:
     lambda_cycle: float = 8.0
     lambda_stage: float = 4.0
     lambda_div: float = 2.0
-    lambda_recon: float = 4.0  # reconstruction vs. known target
+    lambda_recon: float = 6.0  # reconstruction vs. known target
     lambda_percep: float = 4.0  # VGG feature matching
 
     # ── Diversity ─────────────────────────────────────────────────────
-    n_div_samples: int = 2
+    n_div_samples: int = 4
 
     # ── Inference ─────────────────────────────────────────────────────
     unicode_font: str = r"C:\Windows\Fonts\msyh.ttc"  # MS YaHei fallback
     device: str = "cuda"
     use_amp: bool = True            # BF16 autocast — free speedup on 5090
+    weighted_sampling: bool = False  # balance bucket frequencies via WeightedRandomSampler
+    use_compile: bool = False       # torch.compile requires Triton (Linux only)

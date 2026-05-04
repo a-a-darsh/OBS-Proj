@@ -136,14 +136,19 @@ def train(cfg: Config, resume: str | None = None):
                                           split="val", max_refs=cfg.max_refs,
                                           num_stages=cfg.num_stages,
                                           min_pair_count=cfg.min_pair_count)
-    sampler = WeightedRandomSampler(
-        weights=train_set.sample_weights,
-        num_samples=len(train_set),
-        replacement=True,
-    )
-    loader = DataLoader(train_set, batch_size=cfg.batch_size, sampler=sampler,
-                        num_workers=cfg.num_workers, pin_memory=True,
-                        drop_last=True, persistent_workers=cfg.num_workers > 0)
+    if cfg.weighted_sampling:
+        sampler = WeightedRandomSampler(
+            weights=train_set.sample_weights,
+            num_samples=len(train_set),
+            replacement=True,
+        )
+        loader = DataLoader(train_set, batch_size=cfg.batch_size, sampler=sampler,
+                            num_workers=cfg.num_workers, pin_memory=True,
+                            drop_last=True, persistent_workers=cfg.num_workers > 0)
+    else:
+        loader = DataLoader(train_set, batch_size=cfg.batch_size, shuffle=True,
+                            num_workers=cfg.num_workers, pin_memory=True,
+                            drop_last=True, persistent_workers=cfg.num_workers > 0)
     print(f"Train pairs: {len(train_set):,}  Val chars: {len(val_set.chars):,}")
 
     # ── Models ────────────────────────────────────────────────────────
@@ -153,7 +158,7 @@ def train(cfg: Config, resume: str | None = None):
 
     # torch.compile fuses kernels for faster execution.
     # Warmup takes a few minutes on the first epoch — normal.
-    if cfg.use_amp and hasattr(torch, "compile"):
+    if cfg.use_compile and hasattr(torch, "compile"):
         G = torch.compile(G)
         P = torch.compile(P)
         # D skipped: R1 penalty uses create_graph=True (double backward),

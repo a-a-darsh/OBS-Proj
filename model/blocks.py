@@ -110,15 +110,13 @@ class StyledResBlock(nn.Module):
 
 class DownBlock(nn.Module):
     """Stride-2 conv + normalisation + LeakyReLU.
-    norm: 'instance' | None
+    norm: 'dropout' | None
     """
-    def __init__(self, in_ch: int, out_ch: int, norm: str = 'instance'):
+    def __init__(self, in_ch: int, out_ch: int, norm: str = 'dropout'):
         super().__init__()
-        use_norm = norm is not None
-        layers: list = [nn.Conv2d(in_ch, out_ch, 4, stride=2, padding=1,
-                                  bias=not use_norm)]
-        if norm == 'instance':
-            layers.append(nn.InstanceNorm2d(out_ch, affine=True))
+        layers: list = [nn.Conv2d(in_ch, out_ch, 4, stride=2, padding=1, bias=True)]
+        if norm == 'dropout':
+            layers.append(nn.Dropout2d(p=0.2))
         layers.append(nn.LeakyReLU(0.2, inplace=True))
         self.net = nn.Sequential(*layers)
 
