@@ -44,17 +44,16 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 from PIL import Image
 
-PREFIX_TO_STAGE = {"O": 0, "B": 1, "S": 2, "C": 3, "M": 4, "A": 5, "L": 6}
+PREFIX_TO_STAGE = {"O": 0, "B": 1, "A": 2, "S": 3, "L": 4, "C": 5, "M": 6}
 
 ERA_FOLDER_TO_STAGE = {
-    "oracle_bone_script":     0,
-    "bronze_script":          1,
-    "small_seal_script":      2,
-    "clerical_script":        3,
-    "modern":                 4,
-    "chu_bamboo_silk_script": 5,
-    "Liushutong characters 六书通的字": 6
-
+    "oracle_bone_script":                  0,
+    "bronze_script":                       1,
+    "chu_bamboo_silk_script":              2,
+    "small_seal_script":                   3,
+    "Liushutong characters 六书通的字":    4,
+    "clerical_script":                     5,
+    "modern":                              6,
 }
 
 # JSON path — used to build a number→character lookup
