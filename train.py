@@ -155,8 +155,9 @@ def train(cfg: Config, resume: str | None = None):
     # Warmup takes a few minutes on the first epoch — normal.
     if cfg.use_amp and hasattr(torch, "compile"):
         G = torch.compile(G)
-        D = torch.compile(D)
         P = torch.compile(P)
+        # D skipped: R1 penalty uses create_graph=True (double backward),
+        # which torch.compile does not support.
 
     perceptual = PerceptualLoss(device)
 
