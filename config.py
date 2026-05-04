@@ -37,7 +37,7 @@ class Config:
     image_size: int = 128
     min_pair_count: int = 10        # era-pair buckets with fewer samples3 are dropped
     in_channels: int = 1          # grayscale
-    max_refs: int = 12             # max source-stage images pooled per sample
+    max_refs: int = 1             # max source-stage images pooled per sample
 
     # ── Architecture ──────────────────────────────────────────────────
     nf: int = 64                 # base feature-map count
@@ -54,13 +54,13 @@ class Config:
     n_style_layers: int = 16
 
     # ── Training ──────────────────────────────────────────────────────
-    batch_size: int = 32
+    batch_size: int = 64
     n_epochs: int = 200
     lr_g: float = 1e-4
-    lr_d: float = 3e-4
+    lr_d: float = 1e-2
     beta1: float = 0.0
     beta2: float = 0.99
-    r1_every: int = 8  # apply R1 penalty every N discriminator steps
+    r1_every: int = 2  # apply R1 penalty every N discriminator steps
     save_every: int = 2  # checkpoint every N epochs
     sample_every: int = 1  # save sample images every N epochs
     checkpoint_dir: str = "checkpoints"
@@ -74,7 +74,7 @@ class Config:
     lambda_stage: float = 4.0
     lambda_div: float = 2.0
     lambda_recon: float = 6.0  # reconstruction vs. known target
-    lambda_percep: float = 4.0  # VGG feature matching
+    lambda_percep: float = 8.0  # VGG feature matching
 
     # ── Diversity ─────────────────────────────────────────────────────
     n_div_samples: int = 4
@@ -85,4 +85,5 @@ class Config:
     use_amp: bool = True            # BF16 autocast — free speedup on 5090
     weighted_sampling: bool = False  # balance bucket frequencies via WeightedRandomSampler
     dropout_p: float = 0.2           # channel dropout after each DownBlock (0.0 = off)
+    use_spectral_norm: bool = True   # spectral norm on discriminator weights
     use_compile: bool = False       # torch.compile requires Triton (Linux only)

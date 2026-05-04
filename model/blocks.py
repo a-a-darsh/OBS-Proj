@@ -12,6 +12,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils import spectral_norm as apply_sn
 
 
 class EqualLinear(nn.Module):
@@ -113,11 +114,11 @@ class DownBlock(nn.Module):
     norm: 'instance' | None
     """
     def __init__(self, in_ch: int, out_ch: int, norm: str = 'instance',
-                 dropout_p: float = 0.0):
+                 dropout_p: float = 0.0, spectral_norm: bool = False):
         super().__init__()
         use_norm = norm is not None
-        layers: list = [nn.Conv2d(in_ch, out_ch, 4, stride=2, padding=1,
-                                  bias=not use_norm)]
+        conv = nn.Conv2d(in_ch, out_ch, 4, stride=2, padding=1, bias=not use_norm)
+        layers: list = [apply_sn(conv) if spectral_norm else conv]
         if norm == 'instance':
             layers.append(nn.InstanceNorm2d(out_ch, affine=True))
         layers.append(nn.LeakyReLU(0.2, inplace=True))
@@ -148,12 +149,13 @@ class SelfAttention(nn.Module):
     spatially distant strokes/components to each other.
     gamma starts at 0 so the block is a no-op at init and learns its influence.
     """
-    def __init__(self, channels: int):
+    def __init__(self, channels: int, spectral_norm: bool = False):
         super().__init__()
         mid = max(channels // 8, 1)
-        self.query = nn.Conv2d(channels, mid, 1, bias=False)
-        self.key   = nn.Conv2d(channels, mid, 1, bias=False)
-        self.value = nn.Conv2d(channels, channels, 1, bias=False)
+        wrap = apply_sn if spectral_norm else (lambda x: x)
+        self.query = wrap(nn.Conv2d(channels, mid, 1, bias=False))
+        self.key   = wrap(nn.Conv2d(channels, mid, 1, bias=False))
+        self.value = wrap(nn.Conv2d(channels, channels, 1, bias=False))
         self.gamma = nn.Parameter(torch.zeros(1))
         self._scale = mid ** -0.5
 

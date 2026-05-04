@@ -247,14 +247,15 @@ class CharacterEvolutionDataset(Dataset):
         self.chars = chars[n_val:] if split == "train" else chars[:n_val]
 
         # ── Build all valid (src_stage, tgt_stage) pairs ──────────────
-        # All forward pairs (s < t): any earlier era → any later era.
+        # src is always the earliest available stage for the character;
+        # tgt can be any later stage.
         from collections import Counter
         raw_pairs: list = []
         for char_idx, char in enumerate(self.chars):
             avail = sorted(char["stages"].keys())
-            for i, s in enumerate(avail):
-                for t in avail[i + 1:]:
-                    raw_pairs.append((char_idx, s, t))
+            s = avail[0]
+            for t in avail[1:]:
+                raw_pairs.append((char_idx, s, t))
 
         # Count samples3 per (s, t) bucket; drop buckets below threshold.
         bucket_counts = Counter((s, t) for _, s, t in raw_pairs)
