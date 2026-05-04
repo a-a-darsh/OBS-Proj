@@ -32,11 +32,12 @@ class ContentEncoder(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         nf = cfg.nf
+        dp = cfg.dropout_p
         self.blocks = nn.ModuleList([
             DownBlock(cfg.in_channels, nf,     norm=None),
-            DownBlock(nf,              nf * 2, norm='dropout'),
-            DownBlock(nf * 2,          nf * 4, norm='dropout'),
-            DownBlock(nf * 4,          nf * 8, norm='dropout'),
+            DownBlock(nf,              nf * 2, norm='instance', dropout_p=dp),
+            DownBlock(nf * 2,          nf * 4, norm='instance', dropout_p=dp),
+            DownBlock(nf * 4,          nf * 8, norm='instance', dropout_p=dp),
         ])
         # Applied at 16×16 (after block 2, channels=nf*4)
         self.attn = SelfAttention(nf * 4)

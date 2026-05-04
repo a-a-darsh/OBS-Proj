@@ -84,4 +84,5 @@ class Config:
     device: str = "cuda"
     use_amp: bool = True            # BF16 autocast — free speedup on 5090
     weighted_sampling: bool = False  # balance bucket frequencies via WeightedRandomSampler
+    dropout_p: float = 0.2           # channel dropout after each DownBlock (0.0 = off)
     use_compile: bool = False       # torch.compile requires Triton (Linux only)
