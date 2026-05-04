@@ -24,12 +24,13 @@ Flat prefix layout (legacy OBC-Dataset):
     00014/ ...
 
 Stage mapping:
-  oracle_bone_script / O → stage 0
-  bronze_script      / B → stage 1
-  small_seal_script  / S → stage 2
-  clerical_script    / C → stage 3
-  modern             / M → stage 4
-  chu_bamboo_silk_script / A → stage 5
+  oracle_bone_script         / O → stage 0
+  bronze_script              / B → stage 1
+  chu_bamboo_silk_script     / A → stage 2
+  small_seal_script          / S → stage 3
+  Liushutong                 / L → stage 4
+  clerical_script            / C → stage 5
+  modern                     / M → stage 6
 
 Each __getitem__ returns one (src_stage, tgt_stage) pair sampled from
 the available stages of a single character folder.  Missing stages are
