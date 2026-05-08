@@ -56,11 +56,11 @@ class Config:
     # ── Training ──────────────────────────────────────────────────────
     batch_size: int = 32
     n_epochs: int = 2000
-    lr_g: float = 2e-4
-    lr_d: float = 3e-3
+    lr_g: float = 1e-4
+    lr_d: float = 5e-4
     beta1: float = 0.0
     beta2: float = 0.99
-    r1_every: int = 8  # apply R1 penalty every N discriminator steps
+    r1_every: int = 16  # apply R1 penalty every N discriminator steps
     save_every: int = 2  # checkpoint every N epochs
     sample_every: int = 1  # save sample images every N epochs
     checkpoint_dir: str = "checkpoints"
@@ -73,9 +73,10 @@ class Config:
     lambda_r1: float = 3.0
     lambda_cycle: float =  8.0
     lambda_stage: float = 5.0
-    lambda_div: float = 2.0
-    lambda_recon: float = 6.0  # reconstruction vs. known target
-    lambda_percep: float = 8.0  # VGG feature matching
+    lambda_div: float = 0.0
+    lambda_recon: float = 8.0  # reconstruction vs. known target
+    lambda_stroke: float = 4.0  # stroke (Sobel) loss weight
+    lambda_percep: float = 2.0  # VGG perceptual loss weight
 
     # ── Diversity ─────────────────────────────────────────────────────
     n_div_samples: int = 2

@@ -35,7 +35,7 @@ from model import CharacterGenerator, MultiStageDiscriminator, StagePredictor
 from data import CharacterEvolutionDataset
 from losses import (
     adv_loss_g, adv_loss_d, r1_penalty,
-    cycle_loss, diversity_loss, PerceptualLoss,
+    cycle_loss, diversity_loss, StrokeLoss, PerceptualLoss,
     complexity_weighted_recon, stage_consistency_loss,
 )
 
@@ -150,6 +150,7 @@ def train(cfg: Config, resume: str | None = None):
     D = MultiStageDiscriminator(cfg).to(device)
     P = StagePredictor(cfg).to(device)
 
+    stroke = StrokeLoss().to(device)
     perceptual = PerceptualLoss(device)
 
     opt_G = torch.optim.Adam(G.parameters(), lr=cfg.lr_g, betas=(cfg.beta1, cfg.beta2))
@@ -198,6 +199,7 @@ def train(cfg: Config, resume: str | None = None):
 
             opt_D.zero_grad()
             d_loss.backward()
+            torch.nn.utils.clip_grad_norm_(D.parameters(), max_norm=1.0)
             opt_D.step()
             d_step += 1
 
@@ -223,18 +225,21 @@ def train(cfg: Config, resume: str | None = None):
             # 3. Cycle consistency
             recon_src = G(fake_tgt, tgt_stage, src_stage, noise1)
             g_loss += cfg.lambda_cycle * cycle_loss(recon_src, mean_src)
+            g_loss += cfg.lambda_stroke * stroke(recon_src, mean_src)
             g_loss += cfg.lambda_percep * perceptual(recon_src, mean_src)
 
             # 4. Diversity  (two noise samples should differ)
             fake_tgt2 = G(src_imgs, src_stage, tgt_stage, noise2, src_mask=src_mask)
             g_loss += cfg.lambda_div * diversity_loss(fake_tgt, fake_tgt2)
 
-            # 5. Complexity-weighted reconstruction + perceptual vs. ground-truth target
+            # 5. Complexity-weighted reconstruction + stroke + perceptual vs. ground-truth target
             g_loss += cfg.lambda_recon * complexity_weighted_recon(fake_tgt, tgt_img)
+            g_loss += cfg.lambda_stroke * stroke(fake_tgt, tgt_img)
             g_loss += cfg.lambda_percep * perceptual(fake_tgt, tgt_img)
 
             opt_G.zero_grad()
             g_loss.backward()
+            torch.nn.utils.clip_grad_norm_(G.parameters(), max_norm=1.0)
             opt_G.step()
 
             epoch_d_loss += d_loss.item()

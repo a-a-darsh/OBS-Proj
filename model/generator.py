@@ -14,16 +14,25 @@ losing its semantic identity.
 """
 import torch
 import torch.nn as nn
+from torch.distributions import Beta
 from .blocks import DownBlock, StyledResBlock, StyledUpBlock, SelfAttention
 from .mapper import StageMapper
 from config import STAGE_YEARS, YEAR_MIN, YEAR_MAX
 
 
-def stage_to_year(stage_idx: torch.Tensor) -> torch.Tensor:
-    """Convert integer stage indices to normalized year values in [0, 1]."""
-    lows  = torch.tensor([STAGE_YEARS[i][0] for i in range(len(STAGE_YEARS))], dtype=torch.float32, device=stage_idx.device)
-    highs = torch.tensor([STAGE_YEARS[i][1] for i in range(len(STAGE_YEARS))], dtype=torch.float32, device=stage_idx.device)
-    year_table = lows + torch.rand(len(STAGE_YEARS), device=stage_idx.device) * (highs - lows)
+def stage_to_year(stage_idx: torch.Tensor, concentration: float = 2.0) -> torch.Tensor:
+    """
+    Convert integer stage indices to normalized year values in [0, 1].
+    Samples within each era's year range using a symmetric Beta(c, c)
+    distribution, which peaks at the era midpoint rather than drawing
+    uniformly from the full range.  Higher concentration → tighter peak.
+    """
+    n = len(STAGE_YEARS)
+    lows  = torch.tensor([STAGE_YEARS[i][0] for i in range(n)], dtype=torch.float32, device=stage_idx.device)
+    highs = torch.tensor([STAGE_YEARS[i][1] for i in range(n)], dtype=torch.float32, device=stage_idx.device)
+    c = torch.full((n,), concentration, dtype=torch.float32, device=stage_idx.device)
+    t = Beta(c, c).sample()
+    year_table = lows + t * (highs - lows)
     years = year_table[stage_idx]
     return (years - YEAR_MIN) / (YEAR_MAX - YEAR_MIN)
 

@@ -266,9 +266,12 @@ class CharacterEvolutionDataset(Dataset):
         valid_buckets = {k for k, v in bucket_counts.items() if v >= min_pair_count}
         self.pairs = [(c, s, t) for c, s, t in raw_pairs if (s, t) in valid_buckets]
 
-        # Weight each sample so every surviving bucket is equally likely.
+        # Weight each sample: equalise within each bucket, then bias toward
+        # adjacent-era pairs by dividing by era distance (identity and adjacent
+        # both get distance=1, distance-2 pairs get half the weight, etc.).
         self.sample_weights = [
-            1.0 / bucket_counts[(s, t)] for _, s, t in self.pairs
+            1.0 / (bucket_counts[(s, t)] * max(1, abs(t - s)))
+            for _, s, t in self.pairs
         ]
 
     # ── Helpers ───────────────────────────────────────────────────────

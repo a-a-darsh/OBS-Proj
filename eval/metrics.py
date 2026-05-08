@@ -113,7 +113,7 @@ def build_reference_matrix(dataset, n_chars: int = 200,
         transforms.Normalize([0.5], [0.5]),
     ])
 
-    n_stages = 5
+    n_stages = 7
     sum_mat = np.zeros((n_stages, n_stages))
     count_mat = np.zeros((n_stages, n_stages))
 
