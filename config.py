@@ -8,9 +8,9 @@ STAGE_YEARS: Dict[int, Tuple[int, int]] = {
     0: (-1250, -1050),  # O — Oracle Bone Script (Shang)
     1: (-1046,  -771),  # B — Bronze Inscription (Zhou)
     2: ( -771,  -500),  # A — Spring & Autumn / Chu bamboo-silk
-    3: ( -300,    20),  # S — Small Seal
+    3: ( -300,    0),  # S — Small Seal
     4: ( -100,    20),  # L — Liushutong (later seal)
-    5: ( -141,   280),  # C — Clerical
+    5: ( 200,   600),  # C — Clerical
     6: (  1100,  1500),  # M — Modern / Regular Script
 }
 YEAR_MIN = min(v[0] for v in STAGE_YEARS.values())   # -1250
@@ -39,6 +39,7 @@ class Config:
     max_refs: int = 4             # max source-stage images pooled per sample
 
     # ── Architecture ──────────────────────────────────────────────────
+    dropout: float = 0.1           # dropout rate (mapper MLP + content encoder)
     nf: int = 64                 # base feature-map count
     style_dim: int = 256          # per-layer style code dimension
     style_vec_dim: int = 128      # visual style vector from StyleEncoder
@@ -54,12 +55,12 @@ class Config:
 
     # ── Training ──────────────────────────────────────────────────────
     batch_size: int = 32
-    n_epochs: int = 200
+    n_epochs: int = 2000
     lr_g: float = 2e-4
-    lr_d: float = 2e-4
+    lr_d: float = 3e-3
     beta1: float = 0.0
     beta2: float = 0.99
-    r1_every: int = 16  # apply R1 penalty every N discriminator steps
+    r1_every: int = 8  # apply R1 penalty every N discriminator steps
     save_every: int = 2  # checkpoint every N epochs
     sample_every: int = 1  # save sample images every N epochs
     checkpoint_dir: str = "checkpoints"
@@ -67,14 +68,14 @@ class Config:
     num_workers: int = 8
     min_pair_count = 0
 
-    # ── Loss weights ──────────────────────────────────────────────────
-    lambda_adv: float = 1.0
-    lambda_r1: float = 10.0
-    lambda_cycle: float = 10.0
+    # ── Loss weights ──────────────────────────────────────────────────*-
+    lambda_adv: float = 6.0
+    lambda_r1: float = 3.0
+    lambda_cycle: float =  8.0
     lambda_stage: float = 5.0
-    lambda_div: float = 1.0
-    lambda_recon: float = 10.0  # reconstruction vs. known target
-    lambda_percep: float = 1.0  # VGG feature matching
+    lambda_div: float = 2.0
+    lambda_recon: float = 6.0  # reconstruction vs. known target
+    lambda_percep: float = 8.0  # VGG feature matching
 
     # ── Diversity ─────────────────────────────────────────────────────
     n_div_samples: int = 2

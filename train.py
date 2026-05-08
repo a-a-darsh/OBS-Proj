@@ -169,7 +169,7 @@ def train(cfg: Config, resume: str | None = None):
         epoch_d_loss = epoch_g_loss = 0.0
         n_batches = 0
 
-        for batch in tqdm(loader, desc=f"Epoch {epoch}", leave=False):
+        for batch in (pbar := tqdm(loader, desc=f"Epoch {epoch}", leave=False)):
             src_imgs = batch["src_imgs"].to(device)
             src_mask = batch["src_mask"].to(device)
             tgt_img = batch["tgt_img"].to(device)
@@ -182,17 +182,18 @@ def train(cfg: Config, resume: str | None = None):
             mean_src = (src_imgs * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
             # ── Discriminator step ──────────────────────────────
+            src_rep = mean_src.detach()   # (B, 1, H, W) — source reference for D
             with torch.no_grad():
                 fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
-            real_pred = D(tgt_img, tgt_stage)
-            fake_pred = D(fake_tgt_d.detach(), tgt_stage)
+            real_pred = D(src_rep, tgt_img, src_stage, tgt_stage)
+            fake_pred = D(src_rep, fake_tgt_d, src_stage, tgt_stage)
 
             d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
 
             # Lazy R1: only build input-grad graph on steps where R1 fires
             if d_step % cfg.r1_every == 0:
                 tgt_img_r1 = tgt_img.detach().requires_grad_(True)
-                r1 = r1_penalty(D(tgt_img_r1, tgt_stage), tgt_img_r1)
+                r1 = r1_penalty(D(src_rep, tgt_img_r1, src_stage, tgt_stage), tgt_img_r1)
                 d_loss = d_loss + (cfg.lambda_r1 / 2) * r1
 
             opt_D.zero_grad()
@@ -211,7 +212,7 @@ def train(cfg: Config, resume: str | None = None):
             noise2 = torch.randn(B, cfg.latent_dim, device=device)
 
             fake_tgt = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
-            fake_pred = D(fake_tgt, tgt_stage)
+            fake_pred = D(mean_src, fake_tgt, src_stage, tgt_stage)
 
             # 1. Adversarial
             g_loss = cfg.lambda_adv * adv_loss_g(fake_pred)
@@ -239,6 +240,8 @@ def train(cfg: Config, resume: str | None = None):
             epoch_d_loss += d_loss.item()
             epoch_g_loss += g_loss.item()
             n_batches += 1
+            pbar.set_postfix(D=f"{epoch_d_loss/n_batches:.4f}",
+                             G=f"{epoch_g_loss/n_batches:.4f}")
 
         tqdm.write(f"Epoch {epoch:4d}/{cfg.n_epochs}  "
                    f"D={epoch_d_loss / n_batches:.4f}  "

@@ -16,17 +16,20 @@ import torch.nn.functional as F
 
 class EqualLinear(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, bias: bool = True,
-                 activation: bool = False):
+                 activation: bool = False, dropout: float = 0.0):
         super().__init__()
         self.scale = 1.0 / math.sqrt(in_dim)
         self.weight = nn.Parameter(torch.randn(out_dim, in_dim))
         self.bias = nn.Parameter(torch.zeros(out_dim)) if bias else None
         self.activation = activation
+        self.drop = nn.Dropout(dropout) if dropout > 0.0 else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = F.linear(x, self.weight * self.scale, self.bias)
         if self.activation:
             out = F.leaky_relu(out, 0.2) * math.sqrt(2)
+        if self.drop is not None:
+            out = self.drop(out)
         return out
 
 

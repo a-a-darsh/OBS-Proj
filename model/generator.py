@@ -40,11 +40,12 @@ class ContentEncoder(nn.Module):
         ])
         # Applied at 16×16 (after block 2, channels=nf*4)
         self.attn = SelfAttention(nf * 4)
+        self.drop = nn.Dropout2d(cfg.dropout)
 
     def forward(self, x: torch.Tensor):
         skips = []
         for i, block in enumerate(self.blocks):
-            x = block(x)
+            x = self.drop(block(x))
             if i == 2:
                 x = self.attn(x)
             skips.append(x)

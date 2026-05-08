@@ -28,9 +28,9 @@ class StageMapper(nn.Module):
                   + 2 * cfg.stage_emb_dim
                   + 2 * cfg.time_emb_dim)
 
-        layers = [EqualLinear(in_dim, cfg.style_dim, activation=True)]
+        layers = [EqualLinear(in_dim, cfg.style_dim, activation=True, dropout=cfg.dropout)]
         for _ in range(cfg.n_mapper_layers - 2):
-            layers.append(EqualLinear(cfg.style_dim, cfg.style_dim, activation=True))
+            layers.append(EqualLinear(cfg.style_dim, cfg.style_dim, activation=True, dropout=cfg.dropout))
         layers.append(EqualLinear(cfg.style_dim, cfg.style_dim * cfg.n_style_layers))
 
         self.net = nn.Sequential(*layers)

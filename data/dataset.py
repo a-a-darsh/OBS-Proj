@@ -248,14 +248,18 @@ class CharacterEvolutionDataset(Dataset):
         self.chars = chars[n_val:] if split == "train" else chars[:n_val]
 
         # ── Build all valid (src_stage, tgt_stage) pairs ──────────────
-        # src is always the earliest available stage for the character.
         from collections import Counter
         raw_pairs: list = []
         for char_idx, char in enumerate(self.chars):
             avail = sorted(char["stages"].keys())
-            s = avail[0]
-            for t in avail[1:]:
-                raw_pairs.append((char_idx, s, t))
+            for s in avail:
+                for t in avail:
+                    if s != t:
+                        raw_pairs.append((char_idx, s, t))
+            # Identity pair for every available stage so the model learns to
+            # preserve the input when src era == tgt era.
+            for stage in avail:
+                raw_pairs.append((char_idx, stage, stage))
 
         # Count samples per (s, t) bucket; drop buckets below threshold.
         bucket_counts = Counter((s, t) for _, s, t in raw_pairs)
@@ -295,17 +299,25 @@ class CharacterEvolutionDataset(Dataset):
         char_idx, s, t = self.pairs[idx]
         char = self.chars[char_idx]
 
-        # Load up to max_refs source images; pad remainder with zeros
-        src_paths = char["stages"][s]
-        if len(src_paths) > self.max_refs:
-            src_paths = random.sample(src_paths, self.max_refs)
         src_imgs = torch.zeros(self.max_refs, 1, self.image_size, self.image_size)
         src_mask = torch.zeros(self.max_refs, dtype=torch.bool)
-        for i, p in enumerate(src_paths):
-            src_imgs[i] = self._load(p)
-            src_mask[i] = True
 
-        tgt_img = self._load(random.choice(char["stages"][t]))
+        if s == t:
+            # Identity pair: same file for src and tgt so the model learns
+            # to reproduce the input unchanged within its own era.
+            path = random.choice(char["stages"][s])
+            src_imgs[0] = self._load(path)
+            src_mask[0] = True
+            tgt_img = self._load(path)
+        else:
+            # Load up to max_refs source images; pad remainder with zeros
+            src_paths = char["stages"][s]
+            if len(src_paths) > self.max_refs:
+                src_paths = random.sample(src_paths, self.max_refs)
+            for i, p in enumerate(src_paths):
+                src_imgs[i] = self._load(p)
+                src_mask[i] = True
+            tgt_img = self._load(random.choice(char["stages"][t]))
 
         # Availability mask: which stages this character has ground-truth for
         stage_mask = torch.zeros(self.num_stages, dtype=torch.bool)
