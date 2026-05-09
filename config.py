@@ -63,6 +63,7 @@ class Config:
     r1_every: int = 16  # apply R1 penalty every N discriminator steps
     save_every: int = 2  # checkpoint every N epochs
     sample_every: int = 1  # save sample images every N epochs
+    infer_every: int = 1  # save stepwise inference grid every N epochs
     checkpoint_dir: str = "checkpoints"
     sample_dir: str = "samples"
     num_workers: int = 8

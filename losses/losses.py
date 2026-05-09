@@ -43,7 +43,7 @@ def r1_penalty(real_pred: torch.Tensor,
         create_graph=True,
         retain_graph=True,
     )
-    return grad.pow(2).flatten(1).sum(1).mean()
+    return grad.pow(2).mean()
 
 
 # ── Generator auxiliary losses ────────────────────────────────────────────────
@@ -80,10 +80,7 @@ def stage_consistency_loss(predictor: nn.Module,
 # ── Perceptual loss ───────────────────────────────────────────────────────────
 
 class PerceptualLoss(nn.Module):
-    """
-    VGG16 feature matching at relu2_2 and relu3_3.
-    Grayscale inputs are expanded to 3-channel before passing through VGG.
-    """
+    """VGG16 feature matching at relu2_2 and relu3_3."""
     def __init__(self, device: torch.device):
         super().__init__()
         vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features
@@ -98,16 +95,45 @@ class PerceptualLoss(nn.Module):
         self.register_buffer("std",  std)
 
     def _prep(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.repeat(1, 3, 1, 1)                 # grayscale → RGB
-        x = (x * 0.5 + 0.5 - self.mean) / self.std
-        return x
+        x = x.repeat(1, 3, 1, 1)
+        return (x * 0.5 + 0.5 - self.mean) / self.std
 
-    def forward(self, fake: torch.Tensor,
-                real: torch.Tensor) -> torch.Tensor:
+    def forward(self, fake: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
         f, r = self._prep(fake), self._prep(real.detach())
         f1, r1 = self.slice1(f), self.slice1(r)
         f2, r2 = self.slice2(f1), self.slice2(r1)
         return F.l1_loss(f1, r1) + F.l1_loss(f2, r2)
+
+
+# ── Stroke loss ───────────────────────────────────────────────────────────────
+
+class StrokeLoss(nn.Module):
+    """
+    Multi-scale Sobel stroke loss.
+    Compares Sobel edge maps at full and half resolution so the model matches
+    both fine stroke details and coarse stroke layout.  More appropriate than
+    pixel-level loss for character images where strokes are the defining
+    feature rather than semantic content.
+    """
+    def __init__(self):
+        super().__init__()
+        kx = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]],
+                           dtype=torch.float32).view(1, 1, 3, 3)
+        self.register_buffer("kx", kx)
+        self.register_buffer("ky", kx.transpose(-1, -2).contiguous())
+
+    def _edge_map(self, x: torch.Tensor) -> torch.Tensor:
+        x01 = x * 0.5 + 0.5
+        gx = F.conv2d(x01, self.kx, padding=1)
+        gy = F.conv2d(x01, self.ky, padding=1)
+        return (gx.pow(2) + gy.pow(2) + 1e-8).sqrt()
+
+    def forward(self, fake: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+        real = real.detach()
+        loss = F.l1_loss(self._edge_map(fake), self._edge_map(real))
+        loss = loss + F.l1_loss(self._edge_map(F.avg_pool2d(fake, 2)),
+                                self._edge_map(F.avg_pool2d(real, 2)))
+        return loss
 
 
 # ── Complexity-aware weighting ────────────────────────────────────────────────

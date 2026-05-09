@@ -99,6 +99,50 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
     G.train()
 
 
+@torch.no_grad()
+def save_inference_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
+                           epoch: int, cfg: Config, device: torch.device):
+    """
+    Stepwise inference on 8 validation characters: each generated stage is fed
+    as input to the next step, matching how inference.py chains predictions.
+    Saves a grid of real (top row) vs chained inference (bottom row) per character.
+    """
+    G.eval()
+    rows = []
+    n_show = min(8, len(val_set.chars))
+    for char_info in val_set.chars[:n_show]:
+        available = char_info["stages"]
+        earliest = min(available.keys())
+
+        real_row = []
+        for s in range(cfg.num_stages):
+            if s in available:
+                real_row.append(val_set._load(random.choice(available[s])).to(device))
+            else:
+                real_row.append(torch.ones(1, cfg.image_size, cfg.image_size, device=device))
+
+        # Stepwise: feed each output as the source for the next stage
+        current = val_set._load(random.choice(available[earliest])).unsqueeze(0).to(device)
+        gen_row = [torch.ones(1, cfg.image_size, cfg.image_size, device=device)] * earliest
+        gen_row.append(current.squeeze(0))
+        src = earliest
+        for tgt in range(earliest + 1, cfg.num_stages):
+            s_t = torch.tensor([src], device=device)
+            t_t = torch.tensor([tgt], device=device)
+            current = G(current, s_t, t_t)
+            gen_row.append(current.squeeze(0))
+            src = tgt
+
+        rows.append(torch.stack(real_row))
+        rows.append(torch.stack(gen_row))
+
+    grid = torch.cat(rows, dim=0)
+    path = os.path.join(cfg.sample_dir, f"inference_epoch{epoch:04d}.png")
+    os.makedirs(cfg.sample_dir, exist_ok=True)
+    save_image(grid * 0.5 + 0.5, path, nrow=cfg.num_stages)
+    G.train()
+
+
 # ── Main training loop ────────────────────────────────────────────────────────
 
 def load_checkpoint(path: str, G, D, P, opt_G, opt_D, opt_P, device) -> int:
@@ -254,6 +298,9 @@ def train(cfg: Config, resume: str | None = None):
 
         if epoch % cfg.sample_every == 0:
             save_samples(G, val_set, epoch, cfg, device)
+
+        if epoch % cfg.infer_every == 0:
+            save_inference_samples(G, val_set, epoch, cfg, device)
 
         if epoch % cfg.save_every == 0:
             save_checkpoint(G, D, P, opt_G, opt_D, opt_P, epoch, cfg)
