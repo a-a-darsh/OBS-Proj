@@ -43,6 +43,7 @@ import random
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+import torchvision.transforms.functional as TF
 from PIL import Image
 
 PREFIX_TO_STAGE = {"O": 0, "B": 1, "A": 2, "S": 3, "L": 4, "C": 5, "M": 6}
@@ -157,35 +158,20 @@ class CharacterEvolutionDataset(Dataset):
                  seed: int = 42, max_refs: int = 4,
                  num_stages: int = 7,
                  min_pair_count: int = 10,
+                 weight_adjacent: bool = False,
                  json_path: str = _DEFAULT_JSON):
         self.max_refs = max_refs
         self.image_size = image_size
         self.num_stages = num_stages
 
-        _base = [
+        self.transform = transforms.Compose([
             transforms.Grayscale(),
             transforms.Resize((image_size, image_size),
                                interpolation=transforms.InterpolationMode.BICUBIC),
-        ]
-        _to_tensor = [
             transforms.ToTensor(),
             transforms.Normalize([0.5], [0.5]),   # → [-1, 1]
-        ]
-        if split == "train":
-            self.transform = transforms.Compose(_base + [
-                transforms.RandomApply([
-                    transforms.RandomRotation(degrees=5, fill=255),
-                ], p=0.4),
-                transforms.RandomApply([
-                    # Crop then resize back — simulates centering variation
-                    transforms.RandomResizedCrop(
-                        image_size, scale=(0.85, 1.0), ratio=(0.92, 1.08),
-                        interpolation=transforms.InterpolationMode.BICUBIC,
-                    ),
-                ], p=0.4),
-            ] + _to_tensor)
-        else:
-            self.transform = transforms.Compose(_base + _to_tensor)
+        ])
+        self.augment = (split == "train")
 
         num_to_char = _build_number_to_char(json_path)
 
@@ -250,27 +236,31 @@ class CharacterEvolutionDataset(Dataset):
         # ── Build all valid (src_stage, tgt_stage) pairs ──────────────
         from collections import Counter
         raw_pairs: list = []
+        identity_pairs: list = []
         for char_idx, char in enumerate(self.chars):
             avail = sorted(char["stages"].keys())
             for s in avail:
                 for t in avail:
                     if s != t:
                         raw_pairs.append((char_idx, s, t))
-            # Identity pair for every available stage so the model learns to
-            # preserve the input when src era == tgt era.
             for stage in avail:
-                raw_pairs.append((char_idx, stage, stage))
+                identity_pairs.append((char_idx, stage, stage))
+
+        # Cap identity pairs to ~10% of total (cross/9 ≈ 10% of cross+identity).
+        # Shuffle with the same rng used for train/val split for reproducibility.
+        max_identity = len(raw_pairs) // 9
+        rng.shuffle(identity_pairs)
+        raw_pairs.extend(identity_pairs[:max_identity])
 
         # Count samples per (s, t) bucket; drop buckets below threshold.
         bucket_counts = Counter((s, t) for _, s, t in raw_pairs)
         valid_buckets = {k for k, v in bucket_counts.items() if v >= min_pair_count}
         self.pairs = [(c, s, t) for c, s, t in raw_pairs if (s, t) in valid_buckets]
 
-        # Weight each sample: equalise within each bucket, then bias toward
-        # adjacent-era pairs by dividing by era distance (identity and adjacent
-        # both get distance=1, distance-2 pairs get half the weight, etc.).
+        # Weight each sample to equalise across (src, tgt) buckets, with an optional
+        # boost for adjacent pairs (distance=1 gets 2×, distance=2 gets 1×, etc.).
         self.sample_weights = [
-            1.0 / (bucket_counts[(s, t)] * max(1, abs(t - s)))
+            (2.0 if weight_adjacent and abs(t - s) <= 1 else 1.0) / bucket_counts[(s, t)]
             for _, s, t in self.pairs
         ]
 
@@ -290,6 +280,25 @@ class CharacterEvolutionDataset(Dataset):
         img = _invert_if_dark(img)
         return self.transform(img)
 
+    def _maybe_aug(self, imgs: list) -> list:
+        """Apply the same random augmentation to every tensor in imgs (same-pair consistency)."""
+        if not self.augment:
+            return imgs
+        if random.random() < 0.4:
+            angle = random.uniform(-5, 5)
+            # fill=1.0 → white in normalised [-1, 1] space (white = (1.0 - 0.5)/0.5 = 1.0)
+            imgs = [TF.rotate(t, angle, fill=[1.0]) for t in imgs]
+        if random.random() < 0.4:
+            i, j, h, w = transforms.RandomResizedCrop.get_params(
+                imgs[0], scale=(0.85, 1.0), ratio=(0.92, 1.08)
+            )
+            imgs = [
+                TF.resize(TF.crop(t, i, j, h, w), [self.image_size, self.image_size],
+                          interpolation=transforms.InterpolationMode.BICUBIC)
+                for t in imgs
+            ]
+        return imgs
+
     def char_info(self, idx: int) -> dict:
         """Return metadata for a character index (used by inference)."""
         return self.chars[idx]
@@ -306,21 +315,24 @@ class CharacterEvolutionDataset(Dataset):
         src_mask = torch.zeros(self.max_refs, dtype=torch.bool)
 
         if s == t:
-            # Identity pair: same file for src and tgt so the model learns
-            # to reproduce the input unchanged within its own era.
+            # Identity pair: load once, augment once, use for both src and tgt
             path = random.choice(char["stages"][s])
-            src_imgs[0] = self._load(path)
+            img, = self._maybe_aug([self._load(path)])
+            src_imgs[0] = img
             src_mask[0] = True
-            tgt_img = self._load(path)
+            tgt_img = img
         else:
-            # Load up to max_refs source images; pad remainder with zeros
+            # Load all src refs + tgt, then augment together so rotation/crop is consistent
             src_paths = char["stages"][s]
             if len(src_paths) > self.max_refs:
                 src_paths = random.sample(src_paths, self.max_refs)
-            for i, p in enumerate(src_paths):
-                src_imgs[i] = self._load(p)
+            raw = [self._load(p) for p in src_paths]
+            raw.append(self._load(random.choice(char["stages"][t])))
+            augmented = self._maybe_aug(raw)
+            for i, img in enumerate(augmented[:-1]):
+                src_imgs[i] = img
                 src_mask[i] = True
-            tgt_img = self._load(random.choice(char["stages"][t]))
+            tgt_img = augmented[-1]
 
         # Availability mask: which stages this character has ground-truth for
         stage_mask = torch.zeros(self.num_stages, dtype=torch.bool)

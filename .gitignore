@@ -11,3 +11,10 @@
 /checkpoints
 /samples2
 /samples6
+/checkpoints7
+/checkpoints8
+/samples7
+*.7z
+*.zip
+*.iml
+*.xml

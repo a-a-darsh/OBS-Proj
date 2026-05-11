@@ -36,7 +36,17 @@ class Config:
     # ── Preprocessing ─────────────────────────────────────────────────
     image_size: int = 128
     in_channels: int = 1          # grayscale
-    max_refs: int = 4             # max source-stage images pooled per sample
+    max_refs: int = 1
+
+
+
+
+
+
+
+
+
+    # max source-stage images pooled per sample
 
     # ── Architecture ──────────────────────────────────────────────────
     dropout: float = 0.1           # dropout rate (mapper MLP + content encoder)
@@ -54,30 +64,34 @@ class Config:
     n_style_layers: int = 12
 
     # ── Training ──────────────────────────────────────────────────────
-    batch_size: int = 32
+    batch_size: int = 128
     n_epochs: int = 2000
     lr_g: float = 1e-4
-    lr_d: float = 5e-4
+    lr_d: float = 2e-4
     beta1: float = 0.0
     beta2: float = 0.99
-    r1_every: int = 16  # apply R1 penalty every N discriminator steps
-    save_every: int = 2  # checkpoint every N epochs
+    r1_every: int = 8  # apply R1 penalty every N discriminator steps
+    save_every: int = 1  # checkpoint every N epochs
     sample_every: int = 1  # save sample images every N epochs
     infer_every: int = 1  # save stepwise inference grid every N epochs
     checkpoint_dir: str = "checkpoints"
     sample_dir: str = "samples"
     num_workers: int = 8
     min_pair_count = 0
+    use_sample_weights: bool = True
+    weight_adjacent_pairs: bool = True
 
     # ── Loss weights ──────────────────────────────────────────────────*-
     lambda_adv: float = 6.0
-    lambda_r1: float = 3.0
+    lambda_r1: float = 4.0
     lambda_cycle: float =  8.0
     lambda_stage: float = 5.0
     lambda_div: float = 0.0
-    lambda_recon: float = 8.0  # reconstruction vs. known target
-    lambda_stroke: float = 4.0  # stroke (Sobel) loss weight
-    lambda_percep: float = 2.0  # VGG perceptual loss weight
+    lambda_content: float = 6.0  # content feature consistency (structural identity)
+    lambda_recon: float = 6.0  # reconstruction vs. known target
+    lambda_stroke: float = 1.0   # stroke (Sobel edge) loss weight
+    lambda_skeleton: float = 2.0 # morphological skeleton topology loss weight
+    lambda_percep: float = 4.0  # VGG perceptual loss weight
 
     # ── Diversity ─────────────────────────────────────────────────────
     n_div_samples: int = 2

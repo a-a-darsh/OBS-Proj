@@ -126,7 +126,10 @@ class StrokeLoss(nn.Module):
         x01 = x * 0.5 + 0.5
         gx = F.conv2d(x01, self.kx, padding=1)
         gy = F.conv2d(x01, self.ky, padding=1)
-        return (gx.pow(2) + gy.pow(2) + 1e-8).sqrt()
+        mag = (gx.pow(2) + gy.pow(2) + 1e-8).sqrt()
+        # normalize per-image so the L1 is always in [0,1] regardless of stroke density;
+        # also avoids the 1/sqrt(eps) gradient explosion at near-zero edges early in training
+        return mag / (mag.amax(dim=[1, 2, 3], keepdim=True) + 1e-8)
 
     def forward(self, fake: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
         real = real.detach()
@@ -134,6 +137,51 @@ class StrokeLoss(nn.Module):
         loss = loss + F.l1_loss(self._edge_map(F.avg_pool2d(fake, 2)),
                                 self._edge_map(F.avg_pool2d(real, 2)))
         return loss
+
+
+# ── Skeleton loss ─────────────────────────────────────────────────────────────
+
+class SkeletonLoss(nn.Module):
+    """
+    Differentiable morphological skeleton loss.
+
+    Computes an approximate medial-axis skeleton by iteratively eroding the
+    stroke mask and accumulating the "peeled" layers.  Erosion is implemented
+    as max-pool on the inverted mask — exact for binary inputs, smooth enough
+    for gradients.  L1 between fake and real skeletons forces the generator to
+    preserve stroke topology (connectivity, branch count) even when stroke
+    width or style changes across eras.
+
+    No pretrained model needed: the prior that images are dark strokes on a
+    white background makes morphological thinning exact and domain-appropriate.
+    """
+    def __init__(self, iterations: int = 5, kernel_size: int = 3):
+        super().__init__()
+        self.iterations = iterations
+        self.pad = kernel_size // 2
+        self.k = kernel_size
+
+    def _erode(self, x: torch.Tensor) -> torch.Tensor:
+        return 1.0 - F.max_pool2d(1.0 - x, self.k, stride=1, padding=self.pad)
+
+    def _dilate(self, x: torch.Tensor) -> torch.Tensor:
+        return F.max_pool2d(x, self.k, stride=1, padding=self.pad)
+
+    def _skeleton(self, mask: torch.Tensor) -> torch.Tensor:
+        skel = torch.zeros_like(mask)
+        curr = mask
+        for _ in range(self.iterations):
+            eroded = self._erode(curr)
+            skel = skel + (curr - self._dilate(eroded)).clamp(min=0)
+            curr = eroded
+        return skel
+
+    def forward(self, fake: torch.Tensor, real: torch.Tensor) -> torch.Tensor:
+        real = real.detach()
+        # Map from [-1,1] to stroke mask: dark stroke→1, white background→0
+        to_mask = lambda x: 1.0 - (x * 0.5 + 0.5)
+        return F.l1_loss(self._skeleton(to_mask(fake)),
+                         self._skeleton(to_mask(real)))
 
 
 # ── Complexity-aware weighting ────────────────────────────────────────────────

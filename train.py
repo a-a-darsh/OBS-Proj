@@ -25,7 +25,7 @@ import random
 import argparse
 import torch
 import torch.nn.functional as F
-from torch.amp import autocast, GradScaler
+from torch.amp import autocast
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torchvision.utils import save_image
 from tqdm import tqdm
@@ -35,7 +35,7 @@ from model import CharacterGenerator, MultiStageDiscriminator, StagePredictor
 from data import CharacterEvolutionDataset
 from losses import (
     adv_loss_g, adv_loss_d, r1_penalty,
-    cycle_loss, diversity_loss, StrokeLoss, PerceptualLoss,
+    cycle_loss, diversity_loss, StrokeLoss, SkeletonLoss, PerceptualLoss,
     complexity_weighted_recon, stage_consistency_loss,
 )
 
@@ -174,7 +174,8 @@ def train(cfg: Config, resume: str | None = None):
     train_set = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
                                           split="train", max_refs=cfg.max_refs,
                                           num_stages=cfg.num_stages,
-                                          min_pair_count=cfg.min_pair_count)
+                                          min_pair_count=cfg.min_pair_count,
+                                          weight_adjacent=cfg.weight_adjacent_pairs)
     val_set   = CharacterEvolutionDataset(cfg.data_dir, cfg.image_size,
                                           split="val", max_refs=cfg.max_refs,
                                           num_stages=cfg.num_stages,
@@ -183,8 +184,9 @@ def train(cfg: Config, resume: str | None = None):
         weights=train_set.sample_weights,
         num_samples=len(train_set),
         replacement=True,
-    )
+    ) if cfg.use_sample_weights else None
     loader = DataLoader(train_set, batch_size=cfg.batch_size, sampler=sampler,
+                        shuffle=(sampler is None),
                         num_workers=cfg.num_workers, pin_memory=True,
                         drop_last=True, persistent_workers=cfg.num_workers > 0)
     print(f"Train pairs: {len(train_set):,}  Val chars: {len(val_set.chars):,}")
@@ -195,6 +197,7 @@ def train(cfg: Config, resume: str | None = None):
     P = StagePredictor(cfg).to(device)
 
     stroke = StrokeLoss().to(device)
+    skeleton = SkeletonLoss().to(device)
     perceptual = PerceptualLoss(device)
 
     opt_G = torch.optim.Adam(G.parameters(), lr=cfg.lr_g, betas=(cfg.beta1, cfg.beta2))
@@ -205,8 +208,12 @@ def train(cfg: Config, resume: str | None = None):
     if resume:
         start_epoch = load_checkpoint(resume, G, D, P, opt_G, opt_D, opt_P, device)
 
-    d_step = 0
+    # BF16 autocast — no GradScaler needed (BF16 range is sufficient)
+    amp_enabled = cfg.use_amp and device.type == "cuda"
+    amp = lambda: autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp_enabled)
 
+    d_step = 0
+    k = 0
     for epoch in tqdm(range(start_epoch + 1, cfg.n_epochs + 1), desc="Epochs"):
         G.train()
         D.train()
@@ -227,17 +234,19 @@ def train(cfg: Config, resume: str | None = None):
             mean_src = (src_imgs * mask_f).sum(1) / mask_f.sum(1).clamp(min=1)
 
             # ── Discriminator step ──────────────────────────────
-            src_rep = mean_src.detach()   # (B, 1, H, W) — source reference for D
-            with torch.no_grad():
-                fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
-            real_pred = D(src_rep, tgt_img, src_stage, tgt_stage)
-            fake_pred = D(src_rep, fake_tgt_d, src_stage, tgt_stage)
-
-            d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
+            src_rep = mean_src.detach()
+            with amp():
+                with torch.no_grad():
+                    fake_tgt_d = G(src_imgs, src_stage, tgt_stage, src_mask=src_mask)
+                real_pred = D(src_rep, tgt_img, src_stage, tgt_stage)
+                fake_pred = D(src_rep, fake_tgt_d, src_stage, tgt_stage)
+                d_loss = cfg.lambda_adv * adv_loss_d(real_pred, fake_pred)
+            del fake_tgt_d, real_pred, fake_pred
 
             # Lazy R1: only build input-grad graph on steps where R1 fires
             if d_step % cfg.r1_every == 0:
                 tgt_img_r1 = tgt_img.detach().requires_grad_(True)
+                # R1 runs in full precision — gradient norms are precision-sensitive
                 r1 = r1_penalty(D(src_rep, tgt_img_r1, src_stage, tgt_stage), tgt_img_r1)
                 d_loss = d_loss + (cfg.lambda_r1 / 2) * r1
 
@@ -248,38 +257,51 @@ def train(cfg: Config, resume: str | None = None):
             d_step += 1
 
             # ── Predictor step (real images only) ───────────────
-            p_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
+            with amp():
+                p_loss = F.cross_entropy(P(tgt_img.detach()), tgt_stage)
             opt_P.zero_grad()
             p_loss.backward()
             opt_P.step()
 
             # ── Generator step ──────────────────────────────────
             noise1 = torch.randn(B, cfg.latent_dim, device=device)
-            noise2 = torch.randn(B, cfg.latent_dim, device=device)
 
-            fake_tgt = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
-            fake_pred = D(mean_src, fake_tgt, src_stage, tgt_stage)
+            with amp():
+                fake_tgt = G(src_imgs, src_stage, tgt_stage, noise1, src_mask=src_mask)
+                fake_pred = D(mean_src, fake_tgt, src_stage, tgt_stage)
 
-            # 1. Adversarial
-            g_loss = cfg.lambda_adv * adv_loss_g(fake_pred)
+                # 1. Adversarial
+                g_loss = cfg.lambda_adv * adv_loss_g(fake_pred)
+                del fake_pred
 
-            # 2. Stage consistency — gradient flows through G only; P not updated
-            g_loss += cfg.lambda_stage * stage_consistency_loss(P, fake_tgt, tgt_stage)
+                # 2. Content feature consistency — no_grad for src since we detach it
+                with torch.no_grad():
+                    src_content, _ = G.encoder(mean_src)
+                fake_content, _ = G.encoder(fake_tgt)
+                g_loss += cfg.lambda_content * F.l1_loss(fake_content, src_content)
+                del src_content, fake_content
 
-            # 3. Cycle consistency
-            recon_src = G(fake_tgt, tgt_stage, src_stage, noise1)
-            g_loss += cfg.lambda_cycle * cycle_loss(recon_src, mean_src)
-            g_loss += cfg.lambda_stroke * stroke(recon_src, mean_src)
-            g_loss += cfg.lambda_percep * perceptual(recon_src, mean_src)
+                # 3. Stage consistency
+                g_loss += cfg.lambda_stage * stage_consistency_loss(P, fake_tgt, tgt_stage)
 
-            # 4. Diversity  (two noise samples should differ)
-            fake_tgt2 = G(src_imgs, src_stage, tgt_stage, noise2, src_mask=src_mask)
-            g_loss += cfg.lambda_div * diversity_loss(fake_tgt, fake_tgt2)
+                # 4. Cycle consistency — L1 only
+                recon_src = G(fake_tgt, tgt_stage, src_stage, noise1)
+                g_loss += cfg.lambda_cycle * cycle_loss(recon_src, mean_src)
+                del recon_src
 
-            # 5. Complexity-weighted reconstruction + stroke + perceptual vs. ground-truth target
-            g_loss += cfg.lambda_recon * complexity_weighted_recon(fake_tgt, tgt_img)
-            g_loss += cfg.lambda_stroke * stroke(fake_tgt, tgt_img)
-            g_loss += cfg.lambda_percep * perceptual(fake_tgt, tgt_img)
+                # 5. Diversity — skip entirely when weight is zero
+                if cfg.lambda_div > 0:
+                    noise2 = torch.randn(B, cfg.latent_dim, device=device)
+                    fake_tgt2 = G(src_imgs, src_stage, tgt_stage, noise2, src_mask=src_mask)
+                    g_loss += cfg.lambda_div * diversity_loss(fake_tgt, fake_tgt2)
+                    del fake_tgt2
+
+                # 6. Reconstruction + stroke + perceptual vs. ground-truth target
+                g_loss += cfg.lambda_recon * complexity_weighted_recon(fake_tgt, tgt_img)
+                g_loss += cfg.lambda_stroke * stroke(fake_tgt, tgt_img)
+                g_loss += cfg.lambda_skeleton * skeleton(fake_tgt, tgt_img)
+                g_loss += cfg.lambda_percep * perceptual(fake_tgt, tgt_img)
+                del fake_tgt
 
             opt_G.zero_grad()
             g_loss.backward()
@@ -291,16 +313,20 @@ def train(cfg: Config, resume: str | None = None):
             n_batches += 1
             pbar.set_postfix(D=f"{epoch_d_loss/n_batches:.4f}",
                              G=f"{epoch_g_loss/n_batches:.4f}")
+            if k%100==0:
+                save_samples(G, val_set, k, cfg, device)
+                save_inference_samples(G, val_set, k, cfg, device)
+            k+=1
 
         tqdm.write(f"Epoch {epoch:4d}/{cfg.n_epochs}  "
                    f"D={epoch_d_loss / n_batches:.4f}  "
                    f"G={epoch_g_loss / n_batches:.4f}")
 
-        if epoch % cfg.sample_every == 0:
-            save_samples(G, val_set, epoch, cfg, device)
-
-        if epoch % cfg.infer_every == 0:
-            save_inference_samples(G, val_set, epoch, cfg, device)
+        # if epoch % cfg.sample_every == 0:
+        #     save_samples(G, val_set, epoch, cfg, device)
+        #
+        # if epoch % cfg.infer_every == 0:
+        #     save_inference_samples(G, val_set, epoch, cfg, device)
 
         if epoch % cfg.save_every == 0:
             save_checkpoint(G, D, P, opt_G, opt_D, opt_P, epoch, cfg)

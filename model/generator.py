@@ -15,7 +15,7 @@ losing its semantic identity.
 import torch
 import torch.nn as nn
 from torch.distributions import Beta
-from .blocks import DownBlock, StyledResBlock, StyledUpBlock, SelfAttention
+from .blocks import DownBlock, StyledResBlock, StyledUpBlock, SelfAttention, AttentionGate
 from .mapper import StageMapper
 from config import STAGE_YEARS, YEAR_MIN, YEAR_MAX
 
@@ -43,18 +43,17 @@ class ContentEncoder(nn.Module):
         nf = cfg.nf
         self.blocks = nn.ModuleList([
             DownBlock(cfg.in_channels, nf, normalize=False),
-            DownBlock(nf,     nf * 2),
-            DownBlock(nf * 2, nf * 4),
-            DownBlock(nf * 4, nf * 8),
+            DownBlock(nf,     nf * 2, norm='group'),
+            DownBlock(nf * 2, nf * 4, norm='group'),
+            DownBlock(nf * 4, nf * 8, norm='group'),
         ])
         # Applied at 16×16 (after block 2, channels=nf*4)
         self.attn = SelfAttention(nf * 4)
-        self.drop = nn.Dropout2d(cfg.dropout)
 
     def forward(self, x: torch.Tensor):
         skips = []
         for i, block in enumerate(self.blocks):
-            x = self.drop(block(x))
+            x = block(x)
             if i == 2:
                 x = self.attn(x)
             skips.append(x)
@@ -80,16 +79,18 @@ class StyledDecoder(nn.Module):
             StyledUpBlock(nf * 2, nf,     sd),
             StyledUpBlock(nf,     nf // 2, sd),
         ])
-        # Applied at 16×16 (after up_blocks[0], channels=nf*4)
-        self.attn = SelfAttention(nf * 4)
+        # Self-attention: 16×16 after up_blocks[0], 32×32 after up_blocks[1]
+        self.attn  = SelfAttention(nf * 4)
+        self.attn2 = SelfAttention(nf * 2)
 
-        # U-Net skip projections: 1×1 convs fuse encoder features into decoder
-        # Order matches injection depth: [bottleneck, 16×16, 32×32, 64×64]
-        self.skip_projs = nn.ModuleList([
-            nn.Conv2d(nf * 8, nf * 8, 1),
-            nn.Conv2d(nf * 4, nf * 4, 1),
-            nn.Conv2d(nf * 2, nf * 2, 1),
-            nn.Conv2d(nf,     nf,     1),
+        # Attention-gated skips: gate encoder features with current decoder state
+        # before adding, so era-specific texture is suppressed and structure passes.
+        # Order: [8×8 bottleneck, 16×16, 32×32, 64×64]
+        self.skip_gates = nn.ModuleList([
+            AttentionGate(nf * 8),
+            AttentionGate(nf * 4),
+            AttentionGate(nf * 2),
+            AttentionGate(nf),
         ])
 
         self.to_img = nn.Sequential(
@@ -103,7 +104,7 @@ class StyledDecoder(nn.Module):
         # styles: (B, n_style_layers, style_dim)
         x = content
         if skips is not None:
-            x = x + self.skip_projs[0](skips[3])   # inject 8×8 bottleneck skip
+            x = x + self.skip_gates[0](skips[3], x)   # 8×8 bottleneck
         idx = 0
         for res in self.res_blocks:
             x = res(x, styles[:, idx], styles[:, idx + 1])
@@ -114,11 +115,13 @@ class StyledDecoder(nn.Module):
             if i == 0:
                 x = self.attn(x)
                 if skips is not None:
-                    x = x + self.skip_projs[1](skips[2])   # 16×16
-            elif i == 1 and skips is not None:
-                x = x + self.skip_projs[2](skips[1])       # 32×32
+                    x = x + self.skip_gates[1](skips[2], x)   # 16×16
+            elif i == 1:
+                x = self.attn2(x)
+                if skips is not None:
+                    x = x + self.skip_gates[2](skips[1], x)   # 32×32
             elif i == 2 and skips is not None:
-                x = x + self.skip_projs[3](skips[0])       # 64×64
+                x = x + self.skip_gates[3](skips[0], x)       # 64×64
         return self.to_img(x)
 
 

@@ -112,13 +112,23 @@ class StyledResBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """Stride-2 conv + optional InstanceNorm + LeakyReLU."""
-    def __init__(self, in_ch: int, out_ch: int, normalize: bool = True):
+    """Stride-2 conv + optional normalisation + LeakyReLU.
+
+    norm='instance' (default) — InstanceNorm2d, good for discriminators.
+    norm='group'              — GroupNorm, preserves spatial statistics;
+                                use in the content encoder so character
+                                structure is not normalised away.
+    """
+    def __init__(self, in_ch: int, out_ch: int, normalize: bool = True,
+                 norm: str = 'instance'):
         super().__init__()
         layers: list = [nn.Conv2d(in_ch, out_ch, 4, stride=2, padding=1,
                                   bias=not normalize)]
         if normalize:
-            layers.append(nn.InstanceNorm2d(out_ch, affine=True))
+            if norm == 'group':
+                layers.append(nn.GroupNorm(min(32, out_ch), out_ch))
+            else:
+                layers.append(nn.InstanceNorm2d(out_ch, affine=True))
         layers.append(nn.LeakyReLU(0.2, inplace=True))
         self.net = nn.Sequential(*layers)
 
@@ -136,6 +146,24 @@ class StyledUpBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, style: torch.Tensor) -> torch.Tensor:
         return self.act(self.noise(self.conv(x, style)))
+
+
+class AttentionGate(nn.Module):
+    """
+    Filters encoder skip features using the decoder gating signal.
+    Learns a spatial attention map so the decoder can suppress era-specific
+    texture in the skip while preserving character structure.
+    """
+    def __init__(self, channels: int):
+        super().__init__()
+        inter = max(channels // 2, 1)
+        self.W_g = nn.Conv2d(channels, inter, 1)
+        self.W_x = nn.Conv2d(channels, inter, 1, bias=False)
+        self.psi = nn.Conv2d(inter, 1, 1)
+
+    def forward(self, x: torch.Tensor, g: torch.Tensor) -> torch.Tensor:
+        attn = torch.sigmoid(self.psi(F.relu(self.W_g(g) + self.W_x(x), inplace=True)))
+        return x * attn
 
 
 class SelfAttention(nn.Module):
