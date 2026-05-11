@@ -214,14 +214,14 @@ def train(cfg: Config, resume: str | None = None):
 
     d_step = 0
     k = 0
-    for epoch in tqdm(range(start_epoch + 1, cfg.n_epochs + 1), desc="Epochs"):
+    for epoch in tqdm(range(start_epoch + 1, cfg.n_epochs + 1), position=0, leave=False, desc="Epochs"):
         G.train()
         D.train()
         P.train()
         epoch_d_loss = epoch_g_loss = 0.0
         n_batches = 0
 
-        for batch in (pbar := tqdm(loader, desc=f"Epoch {epoch}", leave=False)):
+        for batch in (pbar := tqdm(loader, desc=f"Epoch {epoch}", position=0,leave=False)):
             src_imgs = batch["src_imgs"].to(device)
             src_mask = batch["src_mask"].to(device)
             tgt_img = batch["tgt_img"].to(device)

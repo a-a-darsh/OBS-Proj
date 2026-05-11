@@ -53,15 +53,15 @@ class Config:
     nf: int = 64                 # base feature-map count
     style_dim: int = 256          # per-layer style code dimension
     style_vec_dim: int = 128      # visual style vector from StyleEncoder
-    stage_emb_dim: int = 64       # discrete stage embedding dimension
-    time_emb_dim: int = 64        # Fourier time embedding output dimension
-    n_time_freqs: int = 16        # number of Fourier frequencies
+    stage_emb_dim: int = 128      # discrete stage embedding dimension
+    time_emb_dim: int = 128       # Fourier time embedding output dimension
+    n_time_freqs: int = 32        # number of Fourier frequencies
     latent_dim: int = 256         # noise vector dimension
     n_mapper_layers: int = 8      # MLP depth in StageMapper
-    n_res_blocks: int = 4         # styled residual blocks at bottleneck
+    n_res_blocks: int = 6         # styled residual blocks at bottleneck
     n_enc_blocks: int = 4         # encoder downsampling blocks (64→32→16→8→4)
-    # n_style_layers = n_res_blocks * 2 + n_enc_blocks = 12
-    n_style_layers: int = 12
+    # n_style_layers = n_res_blocks * 2 + n_enc_blocks = 16
+    n_style_layers: int = 16
 
     # ── Training ──────────────────────────────────────────────────────
     batch_size: int = 128
