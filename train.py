@@ -338,7 +338,7 @@ def train(cfg: Config, resume: str | None = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir", default=None)
+    parser.add_argument("--data", "--data_dir", dest="data_dir", default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--n_epochs", type=int, default=None)
     parser.add_argument("--lr_g", type=float, default=None)
