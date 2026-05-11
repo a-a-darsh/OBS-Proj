@@ -66,19 +66,22 @@ def save_samples(G: CharacterGenerator, val_set: CharacterEvolutionDataset,
     for char_info in val_set.chars[:n_show]:
         available = char_info["stages"]
 
-        # Show real images for each stage (blank if missing)
+        # Show real images for each stage (blank if missing).
+        # Record the chosen path for the earliest stage so the generator
+        # receives the exact same image that appears in the real row.
+        earliest = min(available.keys())
+        stage_paths = {s: random.choice(available[s]) for s in available}
+
         real_row = []
         for s in range(cfg.num_stages):
             if s in available:
-                img = val_set._load(random.choice(available[s]))
-                real_row.append(img.to(device))
+                real_row.append(val_set._load(stage_paths[s]).to(device))
             else:
                 real_row.append(torch.ones(1, cfg.image_size, cfg.image_size,
                                            device=device))   # white placeholder
 
         # Generate the full sequence from the earliest available stage (matches training)
-        earliest = min(available.keys())
-        src_img = val_set._load(random.choice(available[earliest])).unsqueeze(0).to(device)
+        src_img = val_set._load(stage_paths[earliest]).unsqueeze(0).to(device)
         src_img_refs = src_img.unsqueeze(1)  # (1, 1, C, H, W)
         src_mask = torch.ones(1, 1, dtype=torch.bool, device=device)
         src_stage_t = torch.tensor([earliest], device=device)
@@ -114,15 +117,17 @@ def save_inference_samples(G: CharacterGenerator, val_set: CharacterEvolutionDat
         available = char_info["stages"]
         earliest = min(available.keys())
 
+        stage_paths = {s: random.choice(available[s]) for s in available}
+
         real_row = []
         for s in range(cfg.num_stages):
             if s in available:
-                real_row.append(val_set._load(random.choice(available[s])).to(device))
+                real_row.append(val_set._load(stage_paths[s]).to(device))
             else:
                 real_row.append(torch.ones(1, cfg.image_size, cfg.image_size, device=device))
 
         # Stepwise: feed each output as the source for the next stage
-        current = val_set._load(random.choice(available[earliest])).unsqueeze(0).to(device)
+        current = val_set._load(stage_paths[earliest]).unsqueeze(0).to(device)
         gen_row = [torch.ones(1, cfg.image_size, cfg.image_size, device=device)] * earliest
         gen_row.append(current.squeeze(0))
         src = earliest
