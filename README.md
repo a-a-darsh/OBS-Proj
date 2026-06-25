@@ -3,6 +3,8 @@
 A bidirectional conditional generative model that morphs Chinese characters across **7 historical script stages spanning 2,000+ years** — from modern Regular Script all the way back to ancient Oracle Bone Script, and forward again.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue) ![PyTorch](https://img.shields.io/badge/PyTorch-2.x-orange) ![License](https://img.shields.io/badge/license-MIT-green)
+<img width="2100" height="803" alt="image" src="https://github.com/user-attachments/assets/04c6be4a-81ed-438c-9426-eef7ec595165" />
+
 
 ---
 
